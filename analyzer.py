@@ -1,0 +1,176 @@
+"""Audio analysis for CrateMatch: BPM, musical key, energy, spectral character.
+
+Results are cached in SQLite so rescans are instant.
+"""
+import hashlib
+import os
+import sqlite3
+import time
+
+import librosa
+import numpy as np
+
+# Krumhansl-Schmuckler key profiles
+MAJOR_PROFILE = np.array([6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88])
+MINOR_PROFILE = np.array([6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17])
+NOTES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
+
+# Open Key / Camelot wheel
+CAMELOT = {
+    "C major": "8B", "G major": "9B", "D major": "10B", "A major": "11B",
+    "E major": "12B", "B major": "1B", "F# major": "2B", "Db major": "3B",
+    "Ab major": "4B", "Eb major": "5B", "Bb major": "6B", "F major": "7B",
+    "A minor": "8A", "E minor": "9A", "B minor": "10A", "F# minor": "11A",
+    "C# minor": "12A", "G# minor": "1A", "Eb minor": "2A", "Bb minor": "3A",
+    "F minor": "4A", "C minor": "5A", "G minor": "6A", "D minor": "7A",
+}
+# normalize enharmonics to the spellings above
+ENHARMONIC = {"D#": "Eb", "G#": "Ab", "A#": "Bb"}
+
+
+def detect_key(chroma_mean):
+    """Krumhansl template matching on a 12-bin chroma vector."""
+    best, best_name, best_corr = -2, "?", -2
+    for shift in range(12):
+        root = NOTES[shift]
+        for mode, profile in (("major", MAJOR_PROFILE), ("minor", MINOR_PROFILE)):
+            rotated = np.roll(profile, shift)
+            corr = np.corrcoef(chroma_mean, rotated)[0, 1]
+            if np.isnan(corr):
+                continue
+            if corr > best_corr:
+                best_corr = corr
+                disp_root = ENHARMONIC.get(root, root)
+                best_name = f"{disp_root} {mode}"
+    return best_name
+
+
+def camelot_of(key_name):
+    return CAMELOT.get(key_name, "?")
+
+
+
+
+def analyze_file(path):
+    """Analyze an audio file. Returns dict or None on failure."""
+    import subprocess
+    import tempfile
+    try:
+        # decode anything ffmpeg understands -> wav (librosa only reads wav/flac well)
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+            wav_path = tmp.name
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-i", path,
+             "-ar", "22050", "-ac", "1", "-c:a", "pcm_s16le", wav_path],
+            check=True)
+        try:
+            y, sr = librosa.load(wav_path, sr=22050, mono=True, duration=150)
+        finally:
+            os.unlink(wav_path)
+        if len(y) < sr * 5:
+            return None
+        tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+        bpm = round(float(np.asarray(tempo).flat[0]), 1)
+
+        chroma = librosa.feature.chroma_cqt(y=y, sr=sr)
+        key_name = detect_key(chroma.mean(axis=1))
+
+        rms = float(librosa.feature.rms(y=y).mean())
+        centroid = float(librosa.feature.spectral_centroid(y=y, sr=sr).mean())
+        zcr = float(librosa.feature.zero_crossing_rate(y).mean())
+        duration = float(librosa.get_duration(y=y, sr=sr))
+
+        return {
+            "bpm": bpm,
+            "key": key_name,
+            "camelot": camelot_of(key_name),
+            "energy": rms,
+            "centroid": centroid,
+            "zcr": zcr,
+            "duration": duration,
+        }
+    except Exception:
+        return None
+
+
+# ---------- cache ----------
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS tracks (
+    path TEXT PRIMARY KEY,
+    artist TEXT, title TEXT,
+    bpm REAL, key_name TEXT, camelot TEXT,
+    energy REAL, centroid REAL, zcr REAL, duration REAL,
+    mtime REAL, analyzed_at REAL
+)"""
+
+
+class Library:
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.conn = sqlite3.connect(db_path)
+        self.conn.execute(SCHEMA)
+        self.conn.commit()
+
+    def get(self, path):
+        cur = self.conn.execute("SELECT * FROM tracks WHERE path = ?", (path,))
+        row = cur.fetchone()
+        if not row:
+            return None
+        cols = [d[0] for d in cur.description]
+        return dict(zip(cols, row))
+
+    def upsert(self, path, artist, title, a):
+        self.conn.execute(
+            """INSERT OR REPLACE INTO tracks
+               (path, artist, title, bpm, key_name, camelot, energy,
+                centroid, zcr, duration, mtime, analyzed_at)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (path, artist, title, a["bpm"], a["key"], a["camelot"],
+             a["energy"], a["centroid"], a["zcr"], a["duration"],
+             os.path.getmtime(path), time.time()))
+        self.conn.commit()
+
+    def all_tracks(self):
+        cur = self.conn.execute("SELECT * FROM tracks ORDER BY artist, title")
+        cols = [d[0] for d in cur.description]
+        return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def count(self):
+        return self.conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
+
+    def remove_missing(self, existing_paths):
+        """Drop rows whose files no longer exist."""
+        existing = set(existing_paths)
+        cur = self.conn.execute("SELECT path FROM tracks")
+        for (p,) in cur.fetchall():
+            if p not in existing:
+                self.conn.execute("DELETE FROM tracks WHERE path = ?", (p,))
+        self.conn.commit()
+
+
+AUDIO_EXTS = {".mp3", ".m4a", ".mp4", ".flac", ".wav", ".aac", ".aiff", ".ogg"}
+
+
+def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
+    """Walk folder, analyze new/changed files. Returns (added, total)."""
+    files = []
+    for root, _, names in os.walk(folder):
+        for n in names:
+            if os.path.splitext(n)[1].lower() in AUDIO_EXTS:
+                files.append(os.path.join(root, n))
+    lib.remove_missing(files)
+    added = 0
+    for i, path in enumerate(files):
+        if progress_cb:
+            progress_cb(i + 1, len(files), os.path.basename(path))
+        row = lib.get(path)
+        mtime = os.path.getmtime(path)
+        if row and abs(row["mtime"] - mtime) < 1:
+            continue
+        a = analyze_file(path)
+        if not a:
+            continue
+        artist, title = artist_title_fn(path)
+        lib.upsert(path, artist, title, a)
+        added += 1
+    return added, len(files)
