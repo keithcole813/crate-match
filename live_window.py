@@ -7,10 +7,13 @@ audio similarity). Drag any result straight onto a Serato deck.
 
 Dark Serato-style UI. Runs alongside Serato on the MacBook.
 """
+import json
 import os
 import queue
+import subprocess
+import threading
 import tkinter as tk
-from tkinter import ttk
+from tkinter import filedialog, messagebox, ttk
 
 try:
     from tkinterdnd2 import TkinterDnD, DND_FILES
@@ -28,6 +31,24 @@ from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
+SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
+
+
+def load_settings():
+    try:
+        with open(SETTINGS_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+def save_settings(s):
+    try:
+        os.makedirs(os.path.dirname(SETTINGS_PATH), exist_ok=True)
+        with open(SETTINGS_PATH, "w") as f:
+            json.dump(s, f, indent=2)
+    except Exception:
+        pass
 
 # Serato-ish dark palette
 BG = "#1a1a1a"
@@ -197,6 +218,9 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 kind, payload = self.msg_q.get_nowait()
                 if kind == "now_playing":
                     self._handle_now_playing(payload)
+                elif kind == "download_done":
+                    path, artist, title = payload
+                    self._on_track_downloaded(path, artist, title)
         except queue.Empty:
             pass
         self.after(150, self._drain)
@@ -302,18 +326,40 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         return ""
 
     # ================= cratetube fill =================
+    def _get_download_dir(self):
+        """Return download dir, prompting first time."""
+        s = load_settings()
+        d = s.get("download_dir")
+        if d and os.path.isdir(d):
+            return d
+        d = filedialog.askdirectory(
+            title="Choose download folder for new tracks",
+            mustexist=True)
+        if d:
+            s["download_dir"] = d
+            save_settings(s)
+            return d
+        return None
+
     def _fill_pocket(self):
-        import json
-        import tempfile
         suggs = getattr(self, "_ct_suggestions", [])
         if not suggs:
             return
-        path = os.path.join(tempfile.gettempdir(),
-                            "cratematch_pocket_suggestions.json")
-        with open(path, "w") as f:
-            json.dump(suggs, f, indent=2)
-        self.status_var.set(f"Wrote {len(suggs)} suggestions → {path} "
-                            "(open in CrateTube)")
+        DownloadPopup(self, suggs, self._get_download_dir(),
+                      self._on_track_downloaded)
+
+    def _on_track_downloaded(self, path, artist, title):
+        """Called (via msg queue) when a download finishes."""
+        from analyzer import analyze_file
+        try:
+            a = analyze_file(path)
+            if a:
+                self.lib.upsert(path, artist, title, a)
+                self.tracks = self.lib.all_tracks()
+                self._refresh_count_label()
+                self._rematch()
+        except Exception as e:
+            self.status_var.set(f"Analyze failed for {title}: {e}")
 
     def _quit(self):
         try:
@@ -321,6 +367,143 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         except Exception:
             pass
         self.destroy()
+
+
+class DownloadPopup(tk.Toplevel):
+    """One-click YouTube MP3 download for unowned pocket suggestions."""
+
+    def __init__(self, parent, suggestions, download_dir, on_done_cb):
+        super().__init__(parent)
+        self.parent_win = parent
+        self.suggestions = suggestions
+        self.download_dir = download_dir
+        self.on_done_cb = on_done_cb
+        self.title("Download missing tracks")
+        self.geometry("460x420")
+        self.configure(bg=BG)
+        self.attributes("-topmost", True)
+
+        hdr = ttk.Frame(self, style="Dark.TFrame")
+        hdr.pack(fill="x", padx=10, pady=(10, 4))
+        ttk.Label(hdr, text=f"{len(suggestions)} tracks not in your library",
+                  style="Gold.TLabel", wraplength=420).pack(anchor="w")
+        dir_txt = download_dir or "(no folder chosen)"
+        self.dir_var = tk.StringVar(value=f"📁 {dir_txt}")
+        row = ttk.Frame(self, style="Dark.TFrame")
+        row.pack(fill="x", padx=10, pady=2)
+        ttk.Label(row, textvariable=self.dir_var, style="Dim.TLabel",
+                  wraplength=340).pack(side="left")
+        ttk.Button(row, text="Change…", style="Dark.TButton",
+                   command=self._change_dir).pack(side="right")
+
+        # suggestion rows
+        body = ttk.Frame(self, style="Dark.TFrame")
+        body.pack(fill="both", expand=True, padx=10, pady=4)
+        canvas = tk.Canvas(body, bg=BG, highlightthickness=0)
+        scroll = ttk.Scrollbar(body, orient="vertical", command=canvas.yview)
+        inner = ttk.Frame(canvas, style="Dark.TFrame")
+        inner.bind("<Configure>",
+                   lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor="nw")
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side="left", fill="both", expand=True)
+        scroll.pack(side="right", fill="y")
+
+        self.rows = []  # (sugg_dict, status_var, dl_button)
+        for i, s in enumerate(suggestions):
+            fr = ttk.Frame(inner, style="Dark.TFrame")
+            fr.pack(fill="x", pady=2)
+            bg = ROW_ALT if i % 2 else ROW_BG
+            lbl = tk.Label(fr, text=f"{s['artist']} — {s['title']}",
+                           bg=bg, fg=FG, font=("Helvetica", 10),
+                           anchor="w", wraplength=330, justify="left")
+            lbl.pack(side="left", fill="x", expand=True, padx=(4, 2),
+                     ipady=4)
+            st = tk.StringVar(value="")
+            tk.Label(fr, textvariable=st, bg=bg, fg=DIM,
+                     font=("Helvetica", 9), width=14).pack(side="left")
+            btn = tk.Button(fr, text="⬇", bg=ROW_BG, fg=GOLD, bd=0,
+                            font=("Helvetica", 12),
+                            activebackground="#3a3a3a")
+            btn.configure(command=lambda s=s, st=st, btn=btn:
+                          self._download(s, st, btn))
+            btn.pack(side="right", padx=4)
+            self.rows.append((s, st, btn))
+
+        ttk.Button(self, text="Download all",
+                   command=self._download_all,
+                   style="Dark.TButton").pack(pady=(4, 10))
+
+    def _change_dir(self):
+        d = filedialog.askdirectory(title="Choose download folder",
+                                    mustexist=True)
+        if d:
+            self.download_dir = d
+            s = load_settings()
+            s["download_dir"] = d
+            save_settings(s)
+            self.dir_var.set(f"📁 {d}")
+
+    def _safe_filename(self, artist, title):
+        base = f"{artist} - {title}".strip(" -")
+        for ch in '/\\:*?"<>|':
+            base = base.replace(ch, "")
+        return base[:120] or "track"
+
+    def _download(self, sugg, status_var, btn):
+        if not self.download_dir or not os.path.isdir(self.download_dir):
+            messagebox.showwarning(
+                "No folder", "Pick a download folder first.")
+            return
+        btn.configure(state="disabled")
+        status_var.set("⏳ downloading…")
+        t = threading.Thread(target=self._worker, args=(sugg, status_var),
+                             daemon=True)
+        t.start()
+
+    def _download_all(self):
+        for s, st, btn in self.rows:
+            if st.get() in ("", "❌ failed"):
+                self._download(s, st, btn)
+
+    def _worker(self, sugg, status_var):
+        artist, title = sugg["artist"], sugg["title"]
+        query = f"{artist} {title}".strip()
+        fname = self._safe_filename(artist, title) + ".mp3"
+        outpath = os.path.join(self.download_dir, fname)
+        try:
+            # 1) find the YouTube video id
+            r = subprocess.run(
+                ["yt-dlp", f"ytsearch1:{query}", "--print", "%(id)s",
+                 "--no-playlist", "--quiet"],
+                capture_output=True, text=True, timeout=60)
+            vid = (r.stdout or "").strip().split("\n")[0].strip()
+            if not vid or r.returncode != 0:
+                raise RuntimeError("YouTube search found nothing")
+            # 2) download as MP3 with a clean filename
+            r = subprocess.run(
+                ["yt-dlp", f"https://youtube.com/watch?v={vid}",
+                 "-x", "--audio-format", "mp3", "--audio-quality", "0",
+                 "-o", outpath, "--no-playlist", "--quiet", "--no-warnings"],
+                capture_output=True, text=True, timeout=600)
+            if r.returncode != 0 or not os.path.exists(outpath):
+                err = (r.stderr or "").strip().split("\n")[-1][:120]
+                raise RuntimeError(err or "download failed")
+            # tell the main window (thread-safe via queue)
+            self.parent_win.msg_q.put(
+                ("download_done", (outpath, artist, title)))
+            self.after(0, lambda: status_var.set("✅ in library"))
+            self.after(0, lambda: self.parent_win.status_var.set(
+                f"Downloaded: {artist} — {title}"))
+        except FileNotFoundError:
+            self.after(0, lambda: status_var.set("❌ no yt-dlp"))
+            self.after(0, lambda: self.parent_win.status_var.set(
+                "yt-dlp not found — pip install yt-dlp"))
+        except Exception as e:
+            msg = str(e)[:60]
+            self.after(0, lambda m=msg: status_var.set("❌ failed"))
+            self.after(0, lambda m=msg: self.parent_win.status_var.set(
+                f"Download failed ({title}): {m}"))
 
 
 def main():
