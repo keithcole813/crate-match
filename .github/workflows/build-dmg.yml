@@ -1,0 +1,64 @@
+name: Build macOS DMG
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt pyinstaller
+
+      - name: Download static ffmpeg
+        run: |
+          curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/ffmpeg-7.1.zip
+          unzip -o ffmpeg.zip -d ffmpeg-bin
+          chmod +x ffmpeg-bin/ffmpeg
+
+      - name: Build .app with PyInstaller
+        run: |
+          pyinstaller --clean --noconfirm \
+            --name "CrateMatch Live" \
+            --windowed \
+            --onedir \
+            --add-binary "ffmpeg-bin/ffmpeg:." \
+            --add-data "README.md:." \
+            --hidden-import tkinterdnd2 \
+            --hidden-import librosa \
+            --hidden-import mutagen \
+            --hidden-import numpy \
+            --hidden-import scipy \
+            --exclude-module torch \
+            --exclude-module tensorflow \
+            live_window.py
+
+      - name: Create DMG
+        run: |
+          DMG="CrateMatch-Live-macOS.dmg"
+          rm -f "$DMG"
+          hdiutil create -volname "CrateMatch Live" \
+            -srcfolder "dist/CrateMatch Live.app" \
+            -ov -format UDZO "$DMG"
+          echo "DMG built: $(ls -lh $DMG)"
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CrateMatch-Live-macOS.dmg
+          body: |
+            ## CrateMatch Live for macOS
+            Download the DMG, open it, drag CrateMatch Live to Applications.
+            Right-click > Open on first launch (unsigned app).
+            No command line needed — ffmpeg is bundled.
