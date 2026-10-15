@@ -43,9 +43,13 @@ Serato while you DJ:
 
 - **Watches Serato's history** (`~/Music/_Serato_/History/Sessions/`) and
   detects the currently playing track within ~2 seconds
-- **Pocket-aware recommendations** — two-layer scoring:
-  - 60% audio similarity (BPM, Camelot key, energy, spectral character)
-  - 40% pocket match (genre + era context, so classic rock stays classic rock)
+- **Three-layer recommendations** —
+  - 50% audio similarity (BPM, Camelot key, energy, spectral character)
+  - 30% pocket match (genre + era context, so classic rock stays classic rock)
+  - 20% set-history match (what you actually played near this track in past
+    sets — ±5 tracks weighted by proximity, learned from ALL your sessions)
+- **Don't repeat tonight** — tracks already played in the current session
+  are excluded from recommendations automatically
 - **Drag straight onto a Serato deck** — grab any result and drop it on an
   open deck or into the queue (needs `tkinterdnd2`)
 - **Sortable columns** — click Title, Artist, BPM, Key, Energy, or Score
@@ -75,7 +79,11 @@ library — results are cached in SQLite, and re-runs only tag new tracks.
 live_window.py      always-on-top dark UI (tkinter + tkinterdnd2)
 serato_watcher.py   tails Serato history .session files, parses the
                     binary format (oent/adat TLV), reports now-playing
-pocket.py           pocket classifier + 0.6*audio + 0.4*pocket scoring,
+history.py          set-history graph: parses ALL past sessions into a
+                    proximity-weighted (±5) transition graph, cached in
+                    SQLite; "don't repeat tonight" exclusion
+pocket.py           pocket classifier + three-layer scoring
+                    (0.5*audio + 0.3*pocket + 0.2*history),
                     Camelot/Classic/Open Key conversions
 genre_tagger.py     MusicBrainz batch genre + year tagging
 cratetube_bridge.py suggests iconic tracks for thin pockets as JSON

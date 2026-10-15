@@ -8,40 +8,37 @@ on:
 
 jobs:
   build:
-    runs-on: macos-latest
+    runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: '3.11'
+
+      - name: Install ffmpeg via brew
+        run: brew install ffmpeg
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt pyinstaller
-
-      - name: Download static ffmpeg
-        run: |
-          curl -L -o ffmpeg.zip https://evermeet.cx/ffmpeg/ffmpeg-7.1.zip
-          unzip -o ffmpeg.zip -d ffmpeg-bin
-          chmod +x ffmpeg-bin/ffmpeg
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
 
       - name: Build .app with PyInstaller
         run: |
+          FFMPEG_BIN=$(brew --prefix ffmpeg)/bin/ffmpeg
           pyinstaller --clean --noconfirm \
             --name "CrateMatch Live" \
             --windowed \
             --onedir \
-            --add-binary "ffmpeg-bin/ffmpeg:." \
-            --add-data "README.md:." \
+            --add-binary "$FFMPEG_BIN:." \
             --hidden-import tkinterdnd2 \
             --hidden-import librosa \
-            --hidden-import mutagen \
-            --hidden-import numpy \
-            --hidden-import scipy \
-            --exclude-module torch \
-            --exclude-module tensorflow \
+            --collect-all librosa \
+            --collect-all numba \
             live_window.py
 
       - name: Create DMG
@@ -51,7 +48,7 @@ jobs:
           hdiutil create -volname "CrateMatch Live" \
             -srcfolder "dist/CrateMatch Live.app" \
             -ov -format UDZO "$DMG"
-          echo "DMG built: $(ls -lh $DMG)"
+          ls -lh "$DMG"
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2

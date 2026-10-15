@@ -11,6 +11,7 @@ live window's key display switcher.
 """
 import re
 
+from history import HistoryGraph, track_key
 from matcher import key_compat, similarity
 
 # ---------- key format conversions ----------
@@ -168,3 +169,59 @@ def pocket_counts(tracks):
         label = classify_pocket(t)["label"]
         counts[label] = counts.get(label, 0) + 1
     return counts
+
+
+# ---------- three-layer scoring (audio + pocket + history) ----------
+def full_score(seed, cand, history_graph=None, seed_key=None,
+               hist_scores=None,
+               w_audio=0.5, w_pocket=0.3, w_history=0.2):
+    """Three-layer score. Returns (score, audio_s, pocket_s, history_s).
+
+    history_graph: HistoryGraph instance (or None to skip the layer).
+    hist_scores: precomputed {track_key: 0..1} for the seed (avoids
+    re-querying per candidate).
+    No history for the seed -> history_s = 0 for all, graceful fallback
+    to audio+pocket.
+    """
+    audio_s = similarity(seed, cand)
+    sp = classify_pocket(seed)
+    cp = classify_pocket(cand)
+    pocket_s = pocket_match(sp, cp)
+    if hist_scores is None and history_graph is not None:
+        sk = seed_key or track_key(seed.get("artist"), seed.get("title"),
+                                   seed.get("path"))
+        hist_scores = history_graph.history_scores(sk)
+    history_s = (hist_scores or {}).get(track_key(cand.get("artist"),
+                                                cand.get("title"),
+                                                cand.get("path")), 0.0)
+    score = w_audio * audio_s + w_pocket * pocket_s + w_history * history_s
+    return score, audio_s, pocket_s, history_s
+
+
+def find_matches(seed, tracks, top_n=20, history_graph=None,
+                 exclude_keys=None,
+                 w_audio=0.5, w_pocket=0.3, w_history=0.2):
+    """Rank tracks by three-layer score.
+
+    exclude_keys: set of track keys to skip entirely
+    ("don't repeat tonight").
+    Returns [(score, track, pocket_label)].
+    """
+    seed_key = track_key(seed.get("artist"), seed.get("title"),
+                         seed.get("path"))
+    seed_pocket = classify_pocket(seed)
+    hist_scores = (history_graph.history_scores(seed_key)
+                   if history_graph is not None else {})
+    out = []
+    for t in tracks:
+        if t.get("path") == seed.get("path"):
+            continue
+        if exclude_keys and track_key(t.get("artist"), t.get("title"),
+                                      t.get("path")) in exclude_keys:
+            continue
+        score, _, _, _ = full_score(
+            seed, t, seed_key=seed_key, hist_scores=hist_scores,
+            w_audio=w_audio, w_pocket=w_pocket, w_history=w_history)
+        out.append((score, t, classify_pocket(t)["label"]))
+    out.sort(key=lambda x: x[0], reverse=True)
+    return out[:top_n]

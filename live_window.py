@@ -24,9 +24,10 @@ except ImportError:
     DND_FILES = None
 
 from analyzer import Library
+from history import HistoryGraph
 from matcher import similarity
-from pocket import (classify_pocket, find_pocket_matches, format_key,
-                    pocket_score)
+from pocket import (classify_pocket, find_matches, find_pocket_matches,
+                    format_key, pocket_score)
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
@@ -89,6 +90,21 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         self.watcher.start()
         self.after(150, self._drain)
         self.protocol("WM_DELETE_WINDOW", self._quit)
+
+        # history graph: built in background so years of sessions
+        # don't freeze startup; recommendations fall back to
+        # audio+pocket until it's ready
+        self.history = None
+        threading.Thread(target=self._build_history,
+                         daemon=True).start()
+
+    def _build_history(self):
+        try:
+            hg = HistoryGraph(self.lib.db_path)
+            parsed, total = hg.sync()
+            self.msg_q.put(("history_ready", (hg, parsed, total)))
+        except Exception:
+            pass  # history stays unavailable; audio+pocket still work
 
     # ================= theme =================
     def _style(self):
@@ -221,6 +237,14 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 elif kind == "download_done":
                     path, artist, title = payload
                     self._on_track_downloaded(path, artist, title)
+                elif kind == "history_ready":
+                    hg, parsed, total = payload
+                    self.history = hg
+                    s, e = hg.stats()
+                    self.status_var.set(
+                        f"History ready: {s} past sets indexed")
+                    if self.seed:
+                        self._rematch()
         except queue.Empty:
             pass
         self.after(150, self._drain)
@@ -251,7 +275,18 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
             n = int(self.count_var.get())
         except ValueError:
             n = 15
-        self.matches = find_pocket_matches(self.seed, self.tracks, top_n=n)
+        # three-layer scoring: audio + pocket + history.
+        # history=None until background sync finishes -> graceful fallback.
+        exclude = None
+        if self.history is not None:
+            try:
+                self.history.sync()  # incremental: only new/changed files
+                exclude = self.history.tonight_keys()
+            except Exception:
+                pass
+        self.matches = find_matches(self.seed, self.tracks, top_n=n,
+                                    history_graph=self.history,
+                                    exclude_keys=exclude)
         self._render()
         # thin pocket? offer CrateTube fill
         try:
