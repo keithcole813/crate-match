@@ -263,19 +263,28 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         self.status_var.set(f"Scanning {folder}…")
 
         def run():
-            # Own Library/connection inside this thread: sqlite
-            # connections are not shareable across threads.
+            # Use the app's one shared connection (check_same_thread=False
+            # + busy timeout): opening a second connection from this
+            # thread is what failed on Keith's Mac with
+            # "unable to open database file".
             try:
-                lib = Library(self.lib.db_path)
-
                 def prog(i, n, name):
                     self.msg_q.put(("scan_status",
                                     f"Analyzing {i}/{n}: {name[:40]}"))
                 added, total, failed = scan_folder(
-                    lib, folder, artist_title_from_file, prog)
+                    self.lib, folder, artist_title_from_file, prog)
                 self.msg_q.put(("scan_done", (added, total, failed, None)))
-            except Exception as e:
-                self.msg_q.put(("scan_done", (0, 0, 0, str(e))))
+            except Exception:
+                import traceback
+                tb = traceback.format_exc()
+                try:
+                    with open(os.path.expanduser(
+                            "~/cratematch-live-error.log"), "a") as f:
+                        f.write("SCAN FAILED\n" + tb + "\n---\n")
+                except Exception:
+                    pass
+                last = tb.strip().splitlines()[-1] if tb.strip() else "error"
+                self.msg_q.put(("scan_done", (0, 0, 0, last)))
 
         threading.Thread(target=run, daemon=True).start()
 
