@@ -86,6 +86,9 @@ class HistoryGraph:
     def __init__(self, db_path, sessions_dir=None):
         self.db_path = db_path
         self.sessions_dir = sessions_dir or default_sessions_dir()
+        parent = os.path.dirname(db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.execute(SCHEMA_SESSIONS)
         self.conn.execute(SCHEMA_EDGES)
