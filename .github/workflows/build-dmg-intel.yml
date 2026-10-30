@@ -14,7 +14,7 @@ jobs:
     runs-on: macos-15-intel
     timeout-minutes: 90
     permissions:
-      contents: read
+      contents: write
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +30,7 @@ jobs:
         run: |
           pip install --upgrade pip
           pip install pyinstaller
-          pip install -r requirements.txt
+          pip install -r requirements-intel.txt
 
       - name: Build .app with PyInstaller
         run: |
@@ -60,3 +60,16 @@ jobs:
         with:
           name: CrateMatch-Live-macOS-Intel
           path: CrateMatch-Live-macOS-Intel.dmg
+
+      - name: Upload to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v1.2-intel
+          name: CrateMatch Live v1.2 (Intel Mac)
+          files: CrateMatch-Live-macOS-Intel.dmg
+          body: |
+            ## CrateMatch Live for Intel Macs
+            For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
+            Download the DMG, open it, drag CrateMatch Live to Applications.
+            Right-click > Open on first launch (unsigned app).
+            No command line needed, ffmpeg is bundled.
