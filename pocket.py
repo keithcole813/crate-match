@@ -125,10 +125,11 @@ def pocket_match(seed_pocket, cand_pocket):
         if (seed_pocket.get("primary_genre") and
                 seed_pocket["primary_genre"] == cand_pocket.get("primary_genre")):
             genre_s = min(1.0, genre_s + 0.25)
-    elif not sg and not cg:
-        genre_s = 0.5  # neither tagged — neutral
     else:
-        genre_s = 0.2  # one side untagged — weak
+        # Either side untagged — neutral. (Was 0.2 when exactly one side
+        # was tagged, which perversely ranked untagged tracks ABOVE
+        # correctly-tagged ones whenever the seed itself had no tag.)
+        genre_s = 0.5
 
     se, ce = seed_pocket.get("era"), cand_pocket.get("era")
     if se and ce and se in _ERA_ORDER and ce in _ERA_ORDER:
@@ -224,4 +225,15 @@ def find_matches(seed, tracks, top_n=20, history_graph=None,
             w_audio=w_audio, w_pocket=w_pocket, w_history=w_history)
         out.append((score, t, classify_pocket(t)["label"]))
     out.sort(key=lambda x: x[0], reverse=True)
-    return out[:top_n]
+    # The same song living in two folders is two DB rows but one
+    # suggestion — keep only the best-scored copy of each artist+title.
+    seen, deduped = set(), []
+    for item in out:
+        t = item[1]
+        k = ((t.get("artist") or "").strip().lower(),
+             (t.get("title") or "").strip().lower())
+        if k != ("", "") and k in seen:
+            continue
+        seen.add(k)
+        deduped.append(item)
+    return deduped[:top_n]
