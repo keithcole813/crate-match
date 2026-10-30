@@ -64,11 +64,12 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2-intel
-          name: CrateMatch Live v1.2 (Intel Mac)
+          tag_name: v1.2.1-intel
+          name: CrateMatch Live v1.2.1 (Intel Mac)
           files: CrateMatch-Live-macOS-Intel.dmg
           body: |
             ## CrateMatch Live for Intel Macs
+            v1.2.1 fixes the first-run crash (app now creates its ~/.crate-match data folder).
             For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
             Download the DMG, open it, drag CrateMatch Live to Applications.
             Right-click > Open on first launch (unsigned app).
