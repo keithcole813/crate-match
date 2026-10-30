@@ -64,12 +64,12 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2.5-intel
-          name: CrateMatch Live v1.2.5 (Intel Mac)
+          tag_name: v1.2.6-intel
+          name: CrateMatch Live v1.2.6 (Intel Mac)
           files: CrateMatch-Live-macOS-Intel.dmg
           body: |
             ## CrateMatch Live for Intel Macs
-            v1.2.5: scan uses the app's single database connection + full error logging.
+            v1.2.6: scan loads genre+year from file tags so the pocket layer works; duplicate songs deduped.
             For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
             Download the DMG, open it, drag CrateMatch Live to Applications.
             Right-click > Open on first launch (unsigned app).
