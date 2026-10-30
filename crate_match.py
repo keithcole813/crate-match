@@ -171,7 +171,7 @@ class App(tk.Tk):
         def run():
             def prog(i, n, name):
                 self.msg_q.put(("scan_status", f"Analyzing {i}/{n}: {name[:40]}"))
-            added, _ = scan_folder(self.lib, folder, artist_title_from_file, prog)
+            added, _, _failed = scan_folder(self.lib, folder, artist_title_from_file, prog)
             self.msg_q.put(("scan_status",
                             f"{self.lib.count()} tracks indexed ({added} new)"))
             self.msg_q.put(("tracks", None))
