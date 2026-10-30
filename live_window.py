@@ -10,6 +10,7 @@ Dark Serato-style UI. Runs alongside Serato on the MacBook.
 import json
 import os
 import queue
+import re
 import subprocess
 import threading
 import tkinter as tk
@@ -37,7 +38,7 @@ if HAVE_DND:
         HAVE_DND = False
         DND_FILES = None
 
-from analyzer import Library
+from analyzer import Library, scan_folder
 from history import HistoryGraph
 from matcher import similarity
 from pocket import (classify_pocket, find_matches, find_pocket_matches,
@@ -47,6 +48,26 @@ from cratetube_bridge import bridge_for_seed
 
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
+
+
+def artist_title_from_file(path):
+    """Tags first, filename fallback (same rule as the CrateMatch app)."""
+    try:
+        from mutagen import File as MutagenFile
+        m = MutagenFile(path, easy=True)
+        if m:
+            artist = (m.get("artist") or [None])[0]
+            title = (m.get("title") or [None])[0]
+            if artist and title:
+                return artist, title
+    except Exception:
+        pass
+    stem = os.path.splitext(os.path.basename(path))[0]
+    stem = re.sub(r"^\d+\s+", "", stem)
+    if " - " in stem:
+        a, t = stem.split(" - ", 1)
+        return a.strip(), t.strip()
+    return "Unknown Artist", stem
 
 
 def load_settings():
@@ -89,6 +110,8 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         self.matches = []          # [(score, track, pocket_label)]
         self.seed = None
         self.seed_pocket = None
+        self._scanning = False
+        self._last_now = None
         self.msg_q = queue.Queue()
         self._sort_col = "score"
         self._sort_rev = True
@@ -182,6 +205,10 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                                  command=self._fill_pocket,
                                  style="Dark.TButton")
         # shown only when pocket is thin
+        self.scan_btn = ttk.Button(ctl, text="📁 Scan library",
+                                   command=self._scan_library,
+                                   style="Dark.TButton")
+        self.scan_btn.pack(side="right", padx=4)
 
         # --- results tree ---
         cols = ("title", "artist", "bpm", "key", "energy", "score")
@@ -214,7 +241,43 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
 
     # ================= data =================
     def _refresh_count_label(self):
-        self.status_var.set(f"{self.lib.count()} tracks indexed")
+        n = self.lib.count()
+        if n == 0:
+            self.status_var.set(
+                "No tracks indexed yet — click 📁 Scan library "
+                "and pick your music folder")
+        else:
+            self.status_var.set(f"{n} tracks indexed")
+
+    # ================= library scan =================
+    def _scan_library(self):
+        if self._scanning:
+            return
+        folder = filedialog.askdirectory(
+            title="Pick your music folder (the big one, e.g. Music)",
+            initialdir=os.path.expanduser("~/Music"))
+        if not folder:
+            return
+        self._scanning = True
+        self.scan_btn.configure(state="disabled")
+        self.status_var.set(f"Scanning {folder}…")
+
+        def run():
+            # Own Library/connection inside this thread: sqlite
+            # connections are not shareable across threads.
+            try:
+                lib = Library(self.lib.db_path)
+
+                def prog(i, n, name):
+                    self.msg_q.put(("scan_status",
+                                    f"Analyzing {i}/{n}: {name[:40]}"))
+                added, total = scan_folder(lib, folder,
+                                           artist_title_from_file, prog)
+                self.msg_q.put(("scan_done", (added, total, None)))
+            except Exception as e:
+                self.msg_q.put(("scan_done", (0, 0, str(e))))
+
+        threading.Thread(target=run, daemon=True).start()
 
     def _find_seed(self, now):
         """Match the Serato now-playing entry to a library track."""
@@ -248,6 +311,24 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 kind, payload = self.msg_q.get_nowait()
                 if kind == "now_playing":
                     self._handle_now_playing(payload)
+                elif kind == "scan_status":
+                    self.status_var.set(payload)
+                elif kind == "scan_done":
+                    added, total, err = payload
+                    self._scanning = False
+                    self.scan_btn.configure(state="normal")
+                    if err:
+                        self.status_var.set(f"Scan failed: {err}")
+                    else:
+                        self.tracks = self.lib.all_tracks()
+                        self._refresh_count_label()
+                        self.status_var.set(
+                            f"Scan done: {self.lib.count()} tracks indexed "
+                            f"({added} new)")
+                        # re-match whatever Serato is playing right now
+                        self.seed = None
+                        if self._last_now:
+                            self._handle_now_playing(self._last_now)
                 elif kind == "download_done":
                     path, artist, title = payload
                     self._on_track_downloaded(path, artist, title)
@@ -267,11 +348,12 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         if not now:
             self.np_var.set("Waiting for Serato…")
             return
+        self._last_now = now
         label = f"{now.get('artist') or '?'} — {now.get('title') or '?'}"
         self.np_var.set(label)
         seed = self._find_seed(now)
         if not seed:
-            self.pocket_var.set("Track not in CrateMatch library — scan it first")
+            self.pocket_var.set("Track not in library — click 📁 Scan library and pick your music folder")
             self.matches = []
             self._render()
             return
