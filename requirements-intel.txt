@@ -1,0 +1,13 @@
+# Intel (x86_64) pins for CrateMatch Live.
+# The unpinned requirements.txt resolves to librosa 0.11 / llvmlite 0.50,
+# and llvmlite 0.50 ships no Intel macOS wheel, so pip tries to build it
+# from source and fails (no LLVM). These versions all ship x86_64 wheels:
+librosa==0.10.2.post1
+numba==0.60.1
+llvmlite==0.43.0
+numpy==1.26.4
+scipy==1.14.1
+scikit-learn==1.5.2
+mutagen>=1.45.0
+yt-dlp>=2024.8.6
+tkinterdnd2>=0.3.0
