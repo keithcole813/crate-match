@@ -89,7 +89,10 @@ class HistoryGraph:
         parent = os.path.dirname(db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self.conn = sqlite3.connect(db_path)
+        # check_same_thread=False: the graph is built on a background
+        # thread but queried from the UI thread — with the default, the
+        # first cross-thread query raises ProgrammingError.
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self.conn.execute(SCHEMA_SESSIONS)
         self.conn.execute(SCHEMA_EDGES)
         self.conn.execute(SCHEMA_EDGE_INDEX)
