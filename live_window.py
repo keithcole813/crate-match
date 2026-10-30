@@ -23,6 +23,20 @@ except ImportError:
     HAVE_DND = False
     DND_FILES = None
 
+if HAVE_DND:
+    # The import can succeed while the native tkdnd library still fails to
+    # load on this machine (e.g. wrong CPU arch) — that failure only shows
+    # when a DnD window is created, and it kills the app silently. Probe
+    # once here; if tkdnd can't really load, fall back to a plain window
+    # (everything except drag-to-deck still works).
+    try:
+        _probe = TkinterDnD.Tk()
+        _probe.withdraw()
+        _probe.destroy()
+    except Exception:
+        HAVE_DND = False
+        DND_FILES = None
+
 from analyzer import Library
 from history import HistoryGraph
 from matcher import similarity
@@ -542,8 +556,22 @@ class DownloadPopup(tk.Toplevel):
 
 
 def main():
-    w = LiveWindow()
-    w.mainloop()
+    try:
+        w = LiveWindow()
+        w.mainloop()
+    except Exception:
+        # A windowed .app shows no console — without this, a startup crash
+        # looks like "nothing happens". Log the traceback where Keith (and
+        # Amy) can actually read it.
+        import traceback
+        log_path = os.path.expanduser("~/cratematch-live-error.log")
+        try:
+            with open(log_path, "a") as f:
+                f.write(traceback.format_exc() + "\n---\n")
+        except Exception:
+            pass
+        traceback.print_exc()
+        raise
 
 
 if __name__ == "__main__":
