@@ -137,7 +137,8 @@ CREATE TABLE IF NOT EXISTS tracks (
     artist TEXT, title TEXT,
     bpm REAL, key_name TEXT, camelot TEXT,
     energy REAL, centroid REAL, zcr REAL, duration REAL,
-    mtime REAL, analyzed_at REAL
+    mtime REAL, analyzed_at REAL,
+    genres TEXT DEFAULT '', year INTEGER
 )"""
 
 
@@ -150,6 +151,16 @@ class Library:
         self.conn = sqlite3.connect(db_path, check_same_thread=False,
                                     timeout=30)
         self.conn.execute(SCHEMA)
+        # migrate DBs created before genre/year support (the pocket
+        # layer is blind without them)
+        cols = [r[1] for r in
+                self.conn.execute("PRAGMA table_info(tracks)").fetchall()]
+        if "genres" not in cols:
+            self.conn.execute(
+                "ALTER TABLE tracks ADD COLUMN genres TEXT DEFAULT ''")
+        if "year" not in cols:
+            self.conn.execute(
+                "ALTER TABLE tracks ADD COLUMN year INTEGER")
         self.conn.commit()
 
     def get(self, path):
@@ -160,15 +171,26 @@ class Library:
         cols = [d[0] for d in cur.description]
         return dict(zip(cols, row))
 
-    def upsert(self, path, artist, title, a):
+    def upsert(self, path, artist, title, a, genres="", year=None):
         self.conn.execute(
             """INSERT OR REPLACE INTO tracks
                (path, artist, title, bpm, key_name, camelot, energy,
-                centroid, zcr, duration, mtime, analyzed_at)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                centroid, zcr, duration, mtime, analyzed_at, genres, year)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (path, artist, title, a["bpm"], a["key"], a["camelot"],
              a["energy"], a["centroid"], a["zcr"], a["duration"],
-             os.path.getmtime(path), time.time()))
+             os.path.getmtime(path), time.time(), genres or "", year))
+        self.conn.commit()
+
+    def set_tags(self, path, genres, year):
+        """Backfill genre/year on an already-analyzed row (cheap: no
+        audio re-analysis, used when a rescan finds tags missing)."""
+        if not genres and not year:
+            return
+        self.conn.execute(
+            "UPDATE tracks SET genres = COALESCE(NULLIF(?, ''), genres), "
+            "year = COALESCE(?, year) WHERE path = ?",
+            (genres or "", year, path))
         self.conn.commit()
 
     def all_tracks(self):
@@ -212,13 +234,22 @@ def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
             progress_cb(i + 1, len(files), os.path.basename(path))
         row = lib.get(path)
         mtime = os.path.getmtime(path)
+        # tag reader may return (artist, title) or
+        # (artist, title, genres, year) — normalize
+        meta = artist_title_fn(path)
+        artist, title = meta[0], meta[1]
+        genres = meta[2] if len(meta) > 2 else ""
+        year = meta[3] if len(meta) > 3 else None
         if row and abs(row["mtime"] - mtime) < 1:
+            # unchanged audio: still backfill genre/year if the row
+            # predates tag support, so a rescan fixes old libraries
+            if not row.get("genres") and (genres or year):
+                lib.set_tags(path, genres, year)
             continue
         a = analyze_file(path)
         if not a:
             failed += 1
             continue
-        artist, title = artist_title_fn(path)
-        lib.upsert(path, artist, title, a)
+        lib.upsert(path, artist, title, a, genres, year)
         added += 1
     return added, len(files), failed
