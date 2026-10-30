@@ -4,7 +4,9 @@ Results are cached in SQLite so rescans are instant.
 """
 import hashlib
 import os
+import shutil
 import sqlite3
+import sys
 import time
 
 import numpy as np
@@ -50,6 +52,23 @@ def camelot_of(key_name):
 
 
 
+def _ffmpeg_bin():
+    """Locate an ffmpeg executable: bundled-with-app first, then PATH."""
+    candidates = []
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            candidates.append(os.path.join(meipass, "ffmpeg"))
+        candidates.append(os.path.join(
+            os.path.dirname(sys.executable), "..", "Frameworks", "ffmpeg"))
+        candidates.append(os.path.join(
+            os.path.dirname(sys.executable), "ffmpeg"))
+    for c in candidates:
+        if c and os.path.exists(c):
+            return c
+    return shutil.which("ffmpeg")
+
+
 def analyze_file(path):
     """Analyze an audio file. Returns dict or None on failure."""
     import subprocess
@@ -57,17 +76,34 @@ def analyze_file(path):
     try:
         import librosa  # lazy: a broken audio stack must not kill app startup
 
-        # decode anything ffmpeg understands -> wav (librosa only reads wav/flac well)
-        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
-            wav_path = tmp.name
-        subprocess.run(
-            ["ffmpeg", "-y", "-loglevel", "error", "-i", path,
-             "-ar", "22050", "-ac", "1", "-c:a", "pcm_s16le", wav_path],
-            check=True)
+        # Decode step 1: hand the file straight to librosa/soundfile.
+        # Modern libsndfile reads wav/flac/mp3/ogg natively — no ffmpeg
+        # needed. (The old code shelled out to a bare "ffmpeg" first,
+        # which inside the .app bundle isn't on PATH, so EVERY analysis
+        # silently failed and scans indexed 0 tracks.)
+        y = sr = None
         try:
-            y, sr = librosa.load(wav_path, sr=22050, mono=True, duration=150)
-        finally:
-            os.unlink(wav_path)
+            y, sr = librosa.load(path, sr=22050, mono=True, duration=150)
+        except Exception:
+            y = sr = None
+        if y is None:
+            # Decode step 2 (m4a/aac and anything soundfile can't read):
+            # convert with ffmpeg — bundled copy first, PATH copy second.
+            ffmpeg = _ffmpeg_bin()
+            if not ffmpeg:
+                return None
+            with tempfile.NamedTemporaryFile(suffix=".wav",
+                                             delete=False) as tmp:
+                wav_path = tmp.name
+            subprocess.run(
+                [ffmpeg, "-y", "-loglevel", "error", "-i", path,
+                 "-ar", "22050", "-ac", "1", "-c:a", "pcm_s16le", wav_path],
+                check=True)
+            try:
+                y, sr = librosa.load(wav_path, sr=22050, mono=True,
+                                     duration=150)
+            finally:
+                os.unlink(wav_path)
         if len(y) < sr * 5:
             return None
         tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
@@ -156,7 +192,12 @@ AUDIO_EXTS = {".mp3", ".m4a", ".mp4", ".flac", ".wav", ".aac", ".aiff", ".ogg"}
 
 
 def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
-    """Walk folder, analyze new/changed files. Returns (added, total)."""
+    """Walk folder, analyze new/changed files.
+
+    Returns (added, total_found, failed) — failed counts files that were
+    found but could not be analyzed, so the UI can tell "empty folder"
+    apart from "every file failed".
+    """
     files = []
     for root, _, names in os.walk(folder):
         for n in names:
@@ -164,6 +205,7 @@ def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
                 files.append(os.path.join(root, n))
     lib.remove_missing(files)
     added = 0
+    failed = 0
     for i, path in enumerate(files):
         if progress_cb:
             progress_cb(i + 1, len(files), os.path.basename(path))
@@ -173,8 +215,9 @@ def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
             continue
         a = analyze_file(path)
         if not a:
+            failed += 1
             continue
         artist, title = artist_title_fn(path)
         lib.upsert(path, artist, title, a)
         added += 1
-    return added, len(files)
+    return added, len(files), failed
