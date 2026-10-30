@@ -3,8 +3,8 @@
 # and llvmlite 0.50 ships no Intel macOS wheel, so pip tries to build it
 # from source and fails (no LLVM). These versions all ship x86_64 wheels:
 librosa==0.10.2.post1
-numba==0.60.1
-llvmlite==0.43.0
+numba==0.61.2
+llvmlite==0.44.0
 numpy==1.26.4
 scipy==1.14.1
 scikit-learn==1.5.2
