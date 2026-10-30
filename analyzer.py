@@ -7,7 +7,6 @@ import os
 import sqlite3
 import time
 
-import librosa
 import numpy as np
 
 # Krumhansl-Schmuckler key profiles
@@ -56,6 +55,8 @@ def analyze_file(path):
     import subprocess
     import tempfile
     try:
+        import librosa  # lazy: a broken audio stack must not kill app startup
+
         # decode anything ffmpeg understands -> wav (librosa only reads wav/flac well)
         with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
             wav_path = tmp.name
@@ -107,6 +108,9 @@ CREATE TABLE IF NOT EXISTS tracks (
 class Library:
     def __init__(self, db_path):
         self.db_path = db_path
+        parent = os.path.dirname(db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
         self.conn = sqlite3.connect(db_path)
         self.conn.execute(SCHEMA)
         self.conn.commit()
