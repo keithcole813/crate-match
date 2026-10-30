@@ -306,9 +306,29 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         self.msg_q.put(("now_playing", now))
 
     def _drain(self):
+        # The reschedule lives in `finally`: if any single message handler
+        # raises, the old code never called self.after() again and live
+        # updates froze forever (looked like "stuck on song 1"). Now one
+        # bad message is logged and skipped; the loop cannot die.
         try:
             while True:
                 kind, payload = self.msg_q.get_nowait()
+                try:
+                    self._dispatch_msg(kind, payload)
+                except Exception:
+                    import traceback
+                    try:
+                        with open(os.path.expanduser(
+                                "~/cratematch-live-error.log"), "a") as f:
+                            f.write(traceback.format_exc() + "\n---\n")
+                    except Exception:
+                        pass
+        except queue.Empty:
+            pass
+        finally:
+            self.after(150, self._drain)
+
+    def _dispatch_msg(self, kind, payload):
                 if kind == "now_playing":
                     self._handle_now_playing(payload)
                 elif kind == "scan_status":
@@ -340,9 +360,6 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                         f"History ready: {s} past sets indexed")
                     if self.seed:
                         self._rematch()
-        except queue.Empty:
-            pass
-        self.after(150, self._drain)
 
     def _handle_now_playing(self, now):
         if not now:
