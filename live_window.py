@@ -51,23 +51,35 @@ SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 
 
 def artist_title_from_file(path):
-    """Tags first, filename fallback (same rule as the CrateMatch app)."""
+    """(artist, title, genres, year) from the file's own tags, filename
+    fallback for artist/title. Genre/year feed the pocket layer — without
+    them every pocket is "Unknown" and matches are pure BPM+key."""
+    artist = title = None
+    genres, year = "", None
     try:
         from mutagen import File as MutagenFile
         m = MutagenFile(path, easy=True)
         if m:
             artist = (m.get("artist") or [None])[0]
             title = (m.get("title") or [None])[0]
-            if artist and title:
-                return artist, title
+            g = (m.get("genre") or [None])[0]
+            if g:
+                genres = str(g).strip()
+            d = (m.get("date") or [None])[0]
+            if d:
+                digits = "".join(ch for ch in str(d) if ch.isdigit())
+                if len(digits) >= 4:
+                    year = int(digits[:4])
     except Exception:
         pass
+    if artist and title:
+        return artist, title, genres, year
     stem = os.path.splitext(os.path.basename(path))[0]
     stem = re.sub(r"^\d+\s+", "", stem)
     if " - " in stem:
         a, t = stem.split(" - ", 1)
-        return a.strip(), t.strip()
-    return "Unknown Artist", stem
+        return a.strip(), t.strip(), genres, year
+    return "Unknown Artist", stem, genres, year
 
 
 def load_settings():
