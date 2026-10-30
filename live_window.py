@@ -271,11 +271,11 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 def prog(i, n, name):
                     self.msg_q.put(("scan_status",
                                     f"Analyzing {i}/{n}: {name[:40]}"))
-                added, total = scan_folder(lib, folder,
-                                           artist_title_from_file, prog)
-                self.msg_q.put(("scan_done", (added, total, None)))
+                added, total, failed = scan_folder(
+                    lib, folder, artist_title_from_file, prog)
+                self.msg_q.put(("scan_done", (added, total, failed, None)))
             except Exception as e:
-                self.msg_q.put(("scan_done", (0, 0, str(e))))
+                self.msg_q.put(("scan_done", (0, 0, 0, str(e))))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -334,17 +334,23 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 elif kind == "scan_status":
                     self.status_var.set(payload)
                 elif kind == "scan_done":
-                    added, total, err = payload
+                    added, total, failed, err = payload
                     self._scanning = False
                     self.scan_btn.configure(state="normal")
                     if err:
                         self.status_var.set(f"Scan failed: {err}")
+                    elif total == 0:
+                        self.status_var.set(
+                            "Scan done: no audio files found in that "
+                            "folder — pick the folder your music is in")
                     else:
                         self.tracks = self.lib.all_tracks()
                         self._refresh_count_label()
-                        self.status_var.set(
-                            f"Scan done: {self.lib.count()} tracks indexed "
-                            f"({added} new)")
+                        msg = (f"Scan done: {self.lib.count()} tracks "
+                               f"indexed ({added} new)")
+                        if failed:
+                            msg += f" — {failed} of {total} files failed"
+                        self.status_var.set(msg)
                         # re-match whatever Serato is playing right now
                         self.seed = None
                         if self._last_now:
