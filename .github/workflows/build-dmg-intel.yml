@@ -64,12 +64,12 @@ jobs:
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2.3-intel
-          name: CrateMatch Live v1.2.3 (Intel Mac)
+          tag_name: v1.2.4-intel
+          name: CrateMatch Live v1.2.4 (Intel Mac)
           files: CrateMatch-Live-macOS-Intel.dmg
           body: |
             ## CrateMatch Live for Intel Macs
-            v1.2.3: Scan Library button in the Live window + fixes live updates freezing after the first song.
+            v1.2.4: scan reads mp3/wav/flac directly (no ffmpeg needed) and reports files found vs failed.
             For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
             Download the DMG, open it, drag CrateMatch Live to Applications.
             Right-click > Open on first launch (unsigned app).
