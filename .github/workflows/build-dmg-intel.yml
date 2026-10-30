@@ -1,0 +1,62 @@
+name: Build macOS DMG (Intel)
+
+# One-shot Intel build for CrateMatch Live.
+# GitHub retired the old macos-13 Intel runner (Dec 2025); macos-15-intel is
+# the current Intel label, available until Aug 2027, free for public repos.
+# Trigger manually: repo -> Actions tab -> "Build macOS DMG (Intel)" -> Run workflow.
+# The finished DMG downloads as a workflow artifact (no tag/release needed).
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build-intel:
+    runs-on: macos-15-intel
+    timeout-minutes: 90
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install ffmpeg via brew
+        run: brew install ffmpeg
+
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller
+          pip install -r requirements.txt
+
+      - name: Build .app with PyInstaller
+        run: |
+          FFMPEG_BIN=$(brew --prefix ffmpeg)/bin/ffmpeg
+          pyinstaller --clean --noconfirm \
+            --name "CrateMatch Live" \
+            --windowed \
+            --onedir \
+            --add-binary "$FFMPEG_BIN:." \
+            --hidden-import tkinterdnd2 \
+            --hidden-import librosa \
+            --collect-all librosa \
+            --collect-all numba \
+            live_window.py
+
+      - name: Create DMG
+        run: |
+          DMG="CrateMatch-Live-macOS-Intel.dmg"
+          rm -f "$DMG"
+          hdiutil create -volname "CrateMatch Live" \
+            -srcfolder "dist/CrateMatch Live.app" \
+            -ov -format UDZO "$DMG"
+          ls -lh "$DMG"
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CrateMatch-Live-macOS-Intel
+          path: CrateMatch-Live-macOS-Intel.dmg
