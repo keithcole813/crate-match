@@ -4,6 +4,7 @@ Results are cached in SQLite so rescans are instant.
 """
 import hashlib
 import os
+import re
 import shutil
 import sqlite3
 import sys
@@ -182,6 +183,11 @@ class Library:
              os.path.getmtime(path), time.time(), genres or "", year))
         self.conn.commit()
 
+    def delete(self, path):
+        """Remove a track from the library (junk/mislabeled files)."""
+        self.conn.execute("DELETE FROM tracks WHERE path = ?", (path,))
+        self.conn.commit()
+
     def set_tags(self, path, genres, year):
         """Backfill genre/year on an already-analyzed row (cheap: no
         audio re-analysis, used when a rescan finds tags missing)."""
@@ -214,6 +220,48 @@ class Library:
 AUDIO_EXTS = {".mp3", ".m4a", ".mp4", ".flac", ".wav", ".aac", ".aiff", ".ogg"}
 
 
+# Folder names are a real genre signal in Keith's library — he files
+# music in folders like "october 2026 rnb". Deepest matching folder
+# name wins. Token-based so "rb" inside other words can't false-fire.
+_FOLDER_GENRES = [
+    ({"rnb", "r&b", "randb"}, "R&B"),
+    ({"dancehall"}, "Dancehall"),
+    ({"soca"}, "Soca"),
+    ({"reggaeton"}, "Reggaeton"),
+    ({"lovers", "rock"}, "Lovers Rock"),
+    ({"reggae"}, "Reggae"),
+    ({"hiphop", "rap"}, "Hip-Hop"),
+    ({"afrobeats", "afrobeat"}, "Afrobeats"),
+    ({"amapiano"}, "Amapiano"),
+    ({"kompa", "zouk"}, "Kompa"),
+    ({"house"}, "House"),
+    ({"techno"}, "Techno"),
+    ({"disco"}, "Disco"),
+    ({"funk"}, "Funk"),
+    ({"motown"}, "Motown"),
+    ({"soul"}, "Soul"),
+    ({"gospel"}, "Gospel"),
+    ({"jazz"}, "Jazz"),
+    ({"latin"}, "Latin"),
+    ({"country"}, "Country"),
+    ({"rock"}, "Rock"),
+    ({"pop"}, "Pop"),
+]
+
+
+def folder_genre(path):
+    """Genre implied by the file's folder names, or "" if none."""
+    parts = os.path.dirname(path).split(os.sep)
+    for part in reversed(parts):  # deepest folder first
+        tokens = set(re.split(r"[^a-z0-9&]+", part.lower())) - {""}
+        if "hip" in tokens and "hop" in tokens:
+            return "Hip-Hop"
+        for keys, genre in _FOLDER_GENRES:
+            if keys & tokens:
+                return genre
+    return ""
+
+
 def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
     """Walk folder, analyze new/changed files.
 
@@ -240,6 +288,8 @@ def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
         artist, title = meta[0], meta[1]
         genres = meta[2] if len(meta) > 2 else ""
         year = meta[3] if len(meta) > 3 else None
+        if not genres:
+            genres = folder_genre(path)  # his folders are genre-filed
         if row and abs(row["mtime"] - mtime) < 1:
             # unchanged audio: still backfill genre/year if the row
             # predates tag support, so a rescan fixes old libraries
