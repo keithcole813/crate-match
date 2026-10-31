@@ -174,15 +174,18 @@ def pocket_counts(tracks):
 
 # ---------- three-layer scoring (audio + pocket + history) ----------
 def full_score(seed, cand, history_graph=None, seed_key=None,
-               hist_scores=None,
-               w_audio=0.5, w_pocket=0.3, w_history=0.2):
-    """Three-layer score. Returns (score, audio_s, pocket_s, history_s).
+               hist_scores=None, crate_index=None, seed_crates=None,
+               w_audio=0.42, w_pocket=0.23, w_history=0.15, w_crate=0.20):
+    """Four-layer score. Returns (score, audio_s, pocket_s, history_s).
 
     history_graph: HistoryGraph instance (or None to skip the layer).
     hist_scores: precomputed {track_key: 0..1} for the seed (avoids
     re-querying per candidate).
-    No history for the seed -> history_s = 0 for all, graceful fallback
-    to audio+pocket.
+    crate_index: (by_path, by_base, n) from crates.load_crate_index;
+    seed_crates: precomputed crates_for(seed). Sharing a crate with the
+    seed is the strongest signal available (Keith curated it by hand):
+    crate_s = 1.0 shared, 0.0 when both are crated but share none,
+    0.5 neutral when either side has no crate data.
     """
     audio_s = similarity(seed, cand)
     sp = classify_pocket(seed)
@@ -195,17 +198,30 @@ def full_score(seed, cand, history_graph=None, seed_key=None,
     history_s = (hist_scores or {}).get(track_key(cand.get("artist"),
                                                 cand.get("title"),
                                                 cand.get("path")), 0.0)
-    score = w_audio * audio_s + w_pocket * pocket_s + w_history * history_s
+    crate_s = 0.5
+    if crate_index is not None:
+        from crates import crates_for
+        sc = seed_crates
+        if sc is None:
+            sc = crates_for(crate_index, seed.get("path"))
+        cc = crates_for(crate_index, cand.get("path"))
+        if sc and cc:
+            crate_s = 1.0 if (sc & cc) else 0.0
+    score = (w_audio * audio_s + w_pocket * pocket_s +
+             w_history * history_s + w_crate * crate_s)
     return score, audio_s, pocket_s, history_s
 
 
 def find_matches(seed, tracks, top_n=20, history_graph=None,
-                 exclude_keys=None,
-                 w_audio=0.5, w_pocket=0.3, w_history=0.2):
-    """Rank tracks by three-layer score.
+                 exclude_keys=None, crate_index=None, min_score=0.0,
+                 w_audio=0.42, w_pocket=0.23, w_history=0.15, w_crate=0.20):
+    """Rank tracks by four-layer score (audio + pocket + history +
+    crates).
 
     exclude_keys: set of track keys to skip entirely
     ("don't repeat tonight").
+    min_score: 0..1 floor — nothing below it is returned (Keith's rule:
+    a shorter honest list beats a full junk list).
     Returns [(score, track, pocket_label)].
     """
     seed_key = track_key(seed.get("artist"), seed.get("title"),
@@ -213,6 +229,10 @@ def find_matches(seed, tracks, top_n=20, history_graph=None,
     seed_pocket = classify_pocket(seed)
     hist_scores = (history_graph.history_scores(seed_key)
                    if history_graph is not None else {})
+    seed_crates = None
+    if crate_index is not None:
+        from crates import crates_for
+        seed_crates = crates_for(crate_index, seed.get("path"))
     out = []
     for t in tracks:
         if t.get("path") == seed.get("path"):
@@ -222,7 +242,11 @@ def find_matches(seed, tracks, top_n=20, history_graph=None,
             continue
         score, _, _, _ = full_score(
             seed, t, seed_key=seed_key, hist_scores=hist_scores,
-            w_audio=w_audio, w_pocket=w_pocket, w_history=w_history)
+            crate_index=crate_index, seed_crates=seed_crates,
+            w_audio=w_audio, w_pocket=w_pocket, w_history=w_history,
+            w_crate=w_crate)
+        if score < min_score:
+            continue
         out.append((score, t, classify_pocket(t)["label"]))
     out.sort(key=lambda x: x[0], reverse=True)
     # The same song living in two folders is two DB rows but one
