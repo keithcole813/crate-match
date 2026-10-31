@@ -49,7 +49,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          DMG="CrateMatch-Live-v1.2.9-macOS-Intel.dmg"
+          DMG="CrateMatch-Live-v1.2.10-macOS-Intel.dmg"
           rm -f "$DMG"
           hdiutil create -volname "CrateMatch Live" \
             -srcfolder "dist/CrateMatch Live.app" \
@@ -59,18 +59,18 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CrateMatch-Live-v1.2.9-macOS-Intel
-          path: CrateMatch-Live-v1.2.9-macOS-Intel.dmg
+          name: CrateMatch-Live-v1.2.10-macOS-Intel
+          path: CrateMatch-Live-v1.2.10-macOS-Intel.dmg
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.2.9-intel
-          name: CrateMatch Live v1.2.9 (Intel Mac)
-          files: CrateMatch-Live-v1.2.9-macOS-Intel.dmg
+          tag_name: v1.2.10-intel
+          name: CrateMatch Live v1.2.10 (Intel Mac)
+          files: CrateMatch-Live-v1.2.10-macOS-Intel.dmg
           body: |
             ## CrateMatch Live for Intel Macs
-            v1.2.9: same build as v1.2.8, DMG filename now carries the version number.
+            v1.2.10: CrateMatch Drop folder (hardlinked live suggestions on your music drive for Serato Files panel) + crates load from external drives too.
             For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
             Download the DMG, open it, drag CrateMatch Live to Applications.
             Right-click > Open on first launch (unsigned app).
