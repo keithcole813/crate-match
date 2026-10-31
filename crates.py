@@ -61,6 +61,10 @@ def load_crate_index(extra_roots=None):
             for p in paths:
                 if not p:
                     continue
+                # Serato stores paths without the leading slash
+                # ('Users/keith/...'); library paths have it — align
+                if not p.startswith("/"):
+                    p = "/" + p
                 by_path.setdefault(_norm(p), set()).add(name)
                 by_base.setdefault(os.path.basename(p).lower(),
                                    set()).add(name)
