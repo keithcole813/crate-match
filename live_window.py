@@ -39,6 +39,7 @@ if HAVE_DND:
         DND_FILES = None
 
 from analyzer import Library, scan_folder, analyze_file
+from crate_io import write_crate
 from crates import load_crate_index
 from history import HistoryGraph
 from matcher import similarity
@@ -137,6 +138,7 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         self.crate_index = None     # (by_path, by_base, n_crates)
         self._tag_filling = False
         self._analyzing_seeds = set()
+        self._last_crate_sig = None  # paths last written to the live crate
 
         self._style()
         self._build()
@@ -174,6 +176,45 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
             self.msg_q.put(("crates_ready", idx))
         except Exception:
             pass
+
+    # ---------- send matches to a Serato crate ----------
+    @staticmethod
+    def _crate_target_path():
+        """The living crate lives with the rest of his crates."""
+        music = os.path.expanduser("~/Music")
+        for sub in ("Subcrates", "Crates"):
+            d = os.path.join(music, "_Serato_", sub)
+            if os.path.isdir(d):
+                return os.path.join(d, "CrateMatch Live.crate")
+        d = os.path.join(music, "_Serato_", "Subcrates")
+        os.makedirs(d, exist_ok=True)
+        return os.path.join(d, "CrateMatch Live.crate")
+
+    def _send_list_to_crate(self, manual=False):
+        """Write the current match list to the 'CrateMatch Live'
+        Serato crate, in ranked order. Auto mode (manual=False) only
+        rewrites when the list actually changed, so Serato sees one
+        living crate that always holds the current suggestions —
+        browsable/loadable from his controller like any crate.
+        Direct deck loading isn't possible from outside Serato;
+        this crate is the supported route."""
+        paths = [t.get("path") for (_s, t, _l) in self.matches
+                 if t.get("path") and os.path.isfile(t.get("path"))]
+        sig = tuple(paths)
+        if not manual and sig == self._last_crate_sig:
+            return
+        self._last_crate_sig = sig
+        try:
+            target = self._crate_target_path()
+            write_crate(target, paths)
+        except Exception as e:
+            if manual:
+                self.status_var.set(f"Crate send failed: {e}")
+            return
+        if manual:
+            self.status_var.set(
+                f"Sent {len(paths)} tracks to the "
+                f"'CrateMatch Live' crate in Serato")
 
     def _min_score(self):
         v = self.min_var.get()
@@ -386,6 +427,11 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                                  command=self._fill_pocket,
                                  style="Dark.TButton")
         # shown only when pocket is thin
+        self.crate_btn = ttk.Button(
+            ctl, text="➡ Send list to crate",
+            command=lambda: self._send_list_to_crate(manual=True),
+            style="Dark.TButton")
+        self.crate_btn.pack(side="right", padx=4)
         self.scan_btn = ttk.Button(ctl, text="📁 Scan library",
                                    command=self._scan_library,
                                    style="Dark.TButton")
@@ -667,6 +713,8 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 self.status_var.set(
                     f"{len(self.matches)} confident matches "
                     f"(min {self.min_var.get()})")
+        # keep the living Serato crate in sync with what's on screen
+        self._send_list_to_crate(manual=False)
         # thin pocket? offer CrateTube fill
         try:
             bridge = bridge_for_seed(self.seed, self.lib.db_path)
