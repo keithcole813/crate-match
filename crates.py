@@ -15,10 +15,17 @@ from crate_io import parse_crate
 
 def _default_roots():
     music = os.path.expanduser("~/Music")
-    return [
+    roots = [
         os.path.join(music, "_Serato_", "Subcrates"),
         os.path.join(music, "_Serato_", "Crates"),
     ]
+    # Keith's music (and Serato library) live on an external drive —
+    # Serato keeps a _Serato_ folder at the root of every volume.
+    import glob as _glob
+    for pat in ("/Volumes/*/_Serato_/Subcrates",
+                "/Volumes/*/_Serato_/Crates"):
+        roots.extend(sorted(_glob.glob(pat)))
+    return roots
 
 
 def crate_name_from_filename(fn):
