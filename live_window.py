@@ -139,6 +139,8 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         self._tag_filling = False
         self._analyzing_seeds = set()
         self._last_crate_sig = None  # paths last written to the live crate
+        self._last_drop_sig = None   # (dir, paths) last put in Drop folder
+        self._drop_announced = False
 
         self._style()
         self._build()
@@ -215,6 +217,80 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
             self.status_var.set(
                 f"Sent {len(paths)} tracks to the "
                 f"'CrateMatch Live' crate in Serato")
+
+    # ---------- CrateMatch Drop folder ----------
+    @staticmethod
+    def _drop_dir_for(seed_path):
+        """Drop folder lives on the SAME volume as the playing track
+        (Keith's music is on an external drive; hardlinks can't cross
+        volumes). External: /Volumes/<vol>/CrateMatch Drop.
+        Internal: ~/Music/CrateMatch Drop."""
+        if seed_path and seed_path.startswith("/Volumes/"):
+            vol = seed_path.split("/")[2]
+            return os.path.join("/Volumes", vol, "CrateMatch Drop")
+        return os.path.expanduser("~/Music/CrateMatch Drop")
+
+    def _refresh_drop_folder(self):
+        """Mirror the current match list into the Drop folder as
+        hardlinks named '01 - Artist - Title.ext' (ranked order), so
+        Serato's Files panel — which reads directories when navigated,
+        unlike crates which Serato owns in memory — always shows the
+        live suggestions. Same-volume files hardlink (no space);
+        anything else falls back to a symlink. A manifest tracks what
+        we created so stale links are cleaned, never user files."""
+        if not self.seed:
+            return
+        drop_dir = self._drop_dir_for(self.seed.get("path"))
+        paths = [t.get("path") for (_s, t, _l) in self.matches
+                 if t.get("path") and os.path.isfile(t.get("path"))]
+        sig = (drop_dir, tuple(paths))
+        if sig == self._last_drop_sig:
+            return
+        self._last_drop_sig = sig
+        try:
+            os.makedirs(drop_dir, exist_ok=True)
+            manifest = os.path.join(drop_dir, ".cratematch_manifest.json")
+            old = []
+            if os.path.isfile(manifest):
+                try:
+                    with open(manifest) as f:
+                        old = json.load(f)
+                except Exception:
+                    old = []
+            new_names = []
+            by_path = {t.get("path"): t for (_s, t, _l) in self.matches}
+            for i, p in enumerate(paths):
+                t = by_path.get(p, {})
+                base = f"{t.get('artist') or 'Unknown'} - " \
+                       f"{t.get('title') or os.path.basename(p)}"
+                base = re.sub(r'[\\/:*?"<>|]', "", base)[:110].strip()
+                ext = os.path.splitext(p)[1]
+                name = f"{i + 1:02d} - {base}{ext}"
+                dst = os.path.join(drop_dir, name)
+                new_names.append(name)
+                if os.path.lexists(dst):
+                    os.unlink(dst)
+                try:
+                    os.link(p, dst)          # hardlink: same file
+                except OSError:
+                    try:
+                        os.symlink(p, dst)   # cross-volume fallback
+                    except OSError:
+                        pass
+            for name in old:
+                if name not in new_names:
+                    stale = os.path.join(drop_dir, name)
+                    if os.path.lexists(stale):
+                        os.unlink(stale)
+            with open(manifest, "w") as f:
+                json.dump(new_names, f)
+            if not self._drop_announced:
+                self._drop_announced = True
+                self.status_var.set(
+                    f"Drop folder live: {drop_dir} "
+                    f"({len(new_names)} tracks)")
+        except Exception:
+            pass
 
     def _min_score(self):
         v = self.min_var.get()
@@ -715,6 +791,8 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                     f"(min {self.min_var.get()})")
         # keep the living Serato crate in sync with what's on screen
         self._send_list_to_crate(manual=False)
+        # and the Drop folder (the actually-live route in Serato)
+        self._refresh_drop_folder()
         # thin pocket? offer CrateTube fill
         try:
             bridge = bridge_for_seed(self.seed, self.lib.db_path)
