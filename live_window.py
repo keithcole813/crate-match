@@ -38,7 +38,8 @@ if HAVE_DND:
         HAVE_DND = False
         DND_FILES = None
 
-from analyzer import Library, scan_folder
+from analyzer import Library, scan_folder, analyze_file
+from crates import load_crate_index
 from history import HistoryGraph
 from matcher import similarity
 from pocket import (classify_pocket, find_matches, find_pocket_matches,
@@ -130,14 +131,26 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
 
         self.count_var = tk.StringVar(value="15")
         self.keyfmt_var = tk.StringVar(value="camelot")
+        _s = load_settings()
+        self.min_var = tk.StringVar(
+            value=str(_s.get("min_score", "60")))
+        self.crate_index = None     # (by_path, by_base, n_crates)
+        self._tag_filling = False
+        self._analyzing_seeds = set()
 
         self._style()
         self._build()
         self._refresh_count_label()
 
+        # Serato crates: Keith's own curation is the strongest match
+        # signal — load in background (parsing can take a moment)
+        threading.Thread(target=self._load_crates, daemon=True).start()
+
         self.watcher = SeratoWatcher(self._on_watcher, interval=2.0)
         self.watcher.start()
         self.after(150, self._drain)
+        # if a previous session left tracks untagged, fill them in
+        self.after(5000, self._start_tag_fill)
         self.protocol("WM_DELETE_WINDOW", self._quit)
 
         # history graph: built in background so years of sessions
@@ -154,6 +167,152 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
             self.msg_q.put(("history_ready", (hg, parsed, total)))
         except Exception:
             pass  # history stays unavailable; audio+pocket still work
+
+    def _load_crates(self):
+        try:
+            idx = load_crate_index()
+            self.msg_q.put(("crates_ready", idx))
+        except Exception:
+            pass
+
+    def _min_score(self):
+        v = self.min_var.get()
+        if v == "Off":
+            return 0.0
+        try:
+            return int(v) / 100.0
+        except ValueError:
+            return 0.60
+
+    def _on_min_changed(self):
+        s = load_settings()
+        s["min_score"] = self.min_var.get()
+        save_settings(s)
+        self._rematch()
+
+    def _refresh_header(self):
+        """Now-playing line 2: pocket + the seed's BPM and key."""
+        if not self.seed:
+            return
+        seed = self.seed
+        pk = classify_pocket(seed)
+        bits = [f"Pocket: {pk['label']}"]
+        if seed.get("bpm"):
+            bits.append(f"{seed['bpm']:.0f} BPM")
+        k = format_key(seed.get("camelot"), self.keyfmt_var.get())
+        if k and k != "?":
+            bits.append(f"Key {k}")
+        self.pocket_var.set(" · ".join(bits))
+
+    # ---------- internet tag fill (MusicBrainz) ----------
+    def _start_tag_fill(self):
+        """Background: fill genre/year for untagged tracks from
+        MusicBrainz (1 req/s, cached in the DB, each track once)."""
+        if self._tag_filling:
+            return
+        self._tag_filling = True
+
+        def run():
+            tagged = 0
+            try:
+                from genre_tagger import mb_search
+                rows = self.lib.conn.execute(
+                    "SELECT path, artist, title FROM tracks "
+                    "WHERE genres IS NULL OR genres = '' "
+                    "ORDER BY artist, title LIMIT 300").fetchall()
+                total = len(rows)
+                import time as _time
+                for i, (path, artist, title) in enumerate(rows):
+                    if i and i % 10 == 0:
+                        self.msg_q.put(
+                            ("tag_status",
+                             f"Filling missing tags from the internet: "
+                             f"{i}/{total}…"))
+                    genres, year = mb_search(artist or "", title or "")
+                    _time.sleep(1.0)  # MusicBrainz rate limit
+                    if genres or year:
+                        self.lib.set_tags(path, genres or "", year)
+                        tagged += 1
+            except Exception:
+                pass
+            self.msg_q.put(("tag_done", (tagged,)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ---------- seed auto-analyze ----------
+    def _analyze_seed_path(self, path):
+        """Now-playing track isn't in the library: analyze that one
+        file on the spot so the header and matches have a real seed."""
+        if path in self._analyzing_seeds:
+            return
+        self._analyzing_seeds.add(path)
+
+        def run():
+            try:
+                a = analyze_file(path)
+                if a:
+                    artist, title, genres, year = \
+                        artist_title_from_file(path)
+                    self.lib.upsert(path, artist, title, a, genres, year)
+                    self.msg_q.put(("seed_ready", path))
+            except Exception:
+                pass
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ---------- drop files in ----------
+    def _on_drop(self, event):
+        try:
+            paths = self.tk.splitlist(event.data)
+        except Exception:
+            return
+        todo = [p for p in paths
+                if os.path.isfile(p) and
+                os.path.splitext(p)[1].lower() in
+                (".mp3", ".wav", ".flac", ".m4a", ".aiff", ".aif",
+                 ".ogg")]
+        if not todo:
+            return
+        self.status_var.set(f"Adding {len(todo)} dropped file(s)…")
+
+        def run():
+            n = 0
+            for p in todo:
+                try:
+                    a = analyze_file(p)
+                    if a:
+                        artist, title, genres, year = \
+                            artist_title_from_file(p)
+                        self.lib.upsert(p, artist, title, a, genres, year)
+                        n += 1
+                except Exception:
+                    pass
+            self.msg_q.put(("drop_done", n))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    # ---------- remove junk ----------
+    def _row_popup(self, event):
+        iid = self.tree.identify_row(event.y)
+        if iid:
+            self.tree.selection_set(iid)
+            try:
+                self._row_menu.tk_popup(event.x_root, event.y_root)
+            finally:
+                self._row_menu.grab_release()
+
+    def _remove_selected(self):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        for iid, t in getattr(self, "_row_tracks", []):
+            if iid == sel[0]:
+                self.lib.delete(t.get("path"))
+                self.tracks = self.lib.all_tracks()
+                self.status_var.set(
+                    f"Removed: {t.get('artist')} — {t.get('title')}")
+                self._rematch()
+                return
 
     # ================= theme =================
     def _style(self):
@@ -212,7 +371,17 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
             values=["camelot", "classic", "openkey"], style="Dark.TCombobox")
         self.key_box.pack(side="left", padx=4)
         self.key_box.bind("<<ComboboxSelected>>",
-                          lambda e: self._render())
+                          lambda e: (self._render(),
+                                     self._refresh_header()))
+        ttk.Label(ctl, text="Min:", style="Dark.TLabel").pack(
+            side="left", padx=(10, 0))
+        self.min_box = ttk.Combobox(
+            ctl, textvariable=self.min_var, width=4, state="readonly",
+            values=["Off", "50", "55", "60", "65"],
+            style="Dark.TCombobox")
+        self.min_box.pack(side="left", padx=4)
+        self.min_box.bind("<<ComboboxSelected>>",
+                          lambda e: self._on_min_changed())
         self.ct_btn = ttk.Button(ctl, text="⬇ Fill pocket",
                                  command=self._fill_pocket,
                                  style="Dark.TButton")
@@ -243,9 +412,20 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         if HAVE_DND:
             self.tree.drag_source_register(DND_FILES)
             self.tree.dnd_bind("<<DragInitCmd>>", self._drag_init)
-            hint = "Drag a track onto a Serato deck"
+            # dropping audio files onto the window adds them to the
+            # library (analyzed on the spot)
+            self.tree.drop_target_register(DND_FILES)
+            self.tree.dnd_bind("<<Drop>>", self._on_drop)
+            hint = ("Drag a track onto a Serato deck · "
+                    "drop files here to add them")
         else:
-            hint = "Install tkinterdnd2 for drag-to-deck"
+            hint = "Drag-and-drop unavailable in this build"
+        # right-click a row to remove junk from the library
+        self._row_menu = tk.Menu(self, tearoff=0)
+        self._row_menu.add_command(label="Remove from library",
+                                   command=self._remove_selected)
+        self.tree.bind("<Button-3>", self._row_popup)
+        self.tree.bind("<Button-2>", self._row_popup)
         # --- status bar ---
         self.status_var = tk.StringVar(value=hint)
         ttk.Label(self, textvariable=self.status_var, style="Dim.TLabel",
@@ -372,6 +552,8 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                         if failed:
                             msg += f" — {failed} of {total} files failed"
                         self.status_var.set(msg)
+                        # fill any missing genre/year from the internet
+                        self._start_tag_fill()
                         # re-match whatever Serato is playing right now
                         self.seed = None
                         if self._last_now:
@@ -379,6 +561,42 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 elif kind == "download_done":
                     path, artist, title = payload
                     self._on_track_downloaded(path, artist, title)
+                elif kind == "crates_ready":
+                    self.crate_index = payload
+                    if payload and payload[2]:
+                        self.status_var.set(
+                            f"Serato crates loaded: {payload[2]} — "
+                            f"crate-mates rank first")
+                    if self.seed:
+                        self._rematch()
+                elif kind == "seed_ready":
+                    self.tracks = self.lib.all_tracks()
+                    self.seed = None
+                    if self._last_now:
+                        self._handle_now_playing(self._last_now)
+                elif kind == "drop_done":
+                    self.tracks = self.lib.all_tracks()
+                    self._refresh_count_label()
+                    self.status_var.set(
+                        f"Added {payload} dropped track(s) — "
+                        f"{self.lib.count()} in library")
+                    if self.seed:
+                        self._rematch()
+                elif kind == "tag_status":
+                    if not self._scanning:
+                        self.status_var.set(payload)
+                elif kind == "tag_done":
+                    self._tag_filling = False
+                    if payload and payload[0]:
+                        self.tracks = self.lib.all_tracks()
+                        self.status_var.set(
+                            f"Tag fill done: {payload[0]} tracks got "
+                            f"genre/year from the internet")
+                        if self.seed:
+                            self.seed = self._find_seed(self._last_now) \
+                                if self._last_now else self.seed
+                            self._refresh_header()
+                            self._rematch()
                 elif kind == "history_ready":
                     hg, parsed, total = payload
                     self.history = hg
@@ -397,7 +615,15 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
         self.np_var.set(label)
         seed = self._find_seed(now)
         if not seed:
-            self.pocket_var.set("Track not in library — click 📁 Scan library and pick your music folder")
+            spath = (now.get("path") or "").strip()
+            if spath and os.path.isfile(spath):
+                self.pocket_var.set(
+                    "Not in library — analyzing this track now…")
+                self._analyze_seed_path(spath)
+            else:
+                self.pocket_var.set(
+                    "Track not in library — click 📁 Scan library "
+                    "and pick your music folder")
             self.matches = []
             self._render()
             return
@@ -405,7 +631,7 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
             return  # same track, nothing to do
         self.seed = seed
         self.seed_pocket = classify_pocket(seed)
-        self.pocket_var.set(f"Pocket: {self.seed_pocket['label']}")
+        self._refresh_header()
         self._rematch()
 
     def _rematch(self):
@@ -424,10 +650,23 @@ class LiveWindow(TkinterDnD.Tk if HAVE_DND else tk.Tk):
                 exclude = self.history.tonight_keys()
             except Exception:
                 pass
-        self.matches = find_matches(self.seed, self.tracks, top_n=n,
-                                    history_graph=self.history,
-                                    exclude_keys=exclude)
+        self.matches = find_matches(
+            self.seed, self.tracks, top_n=n,
+            history_graph=self.history, exclude_keys=exclude,
+            crate_index=self.crate_index, min_score=self._min_score())
         self._render()
+        # Keith's floor rule: a short honest list beats a full junk
+        # list — say so when the floor is what's limiting the count.
+        ms = self._min_score()
+        if ms > 0:
+            if not self.matches:
+                self.status_var.set(
+                    f"No confident matches (min {self.min_var.get()}) — "
+                    f"lower Min to see more")
+            elif len(self.matches) < n:
+                self.status_var.set(
+                    f"{len(self.matches)} confident matches "
+                    f"(min {self.min_var.get()})")
         # thin pocket? offer CrateTube fill
         try:
             bridge = bridge_for_seed(self.seed, self.lib.db_path)
