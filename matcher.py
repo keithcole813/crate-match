@@ -29,11 +29,25 @@ def key_compat(c1, c2):
     return 0.15
 
 
+def _bpm_score(b1, b2):
+    """BPM proximity with tempo folding: slow songs are routinely
+    detected at double tempo (68 read as 136), and DJs mix half/double
+    time anyway — so a folded match counts as near, with a small
+    penalty so a true-tempo match still wins."""
+    if not b1 or not b2:
+        return 0.4
+    d = abs(b1 - b2)
+    folded = min(abs(b1 - 2 * b2), abs(2 * b1 - b2))
+    if folded < d:
+        return max(0.0, 1.0 - folded / 20.0) * 0.92
+    return max(0.0, 1.0 - d / 20.0)
+
+
 def similarity(seed, cand,
                w_bpm=0.35, w_key=0.35, w_energy=0.15, w_spectral=0.15):
     if seed["path"] == cand["path"]:
         return 0.0
-    bpm_s = max(0.0, 1.0 - abs(seed["bpm"] - cand["bpm"]) / 20.0)
+    bpm_s = _bpm_score(seed.get("bpm"), cand.get("bpm"))
     key_s = key_compat(seed.get("camelot"), cand.get("camelot"))
     e1, e2 = seed.get("energy") or 0, cand.get("energy") or 0
     energy_s = max(0.0, 1.0 - abs(e1 - e2) / (max(e1, e2) + 1e-9))
