@@ -33,7 +33,7 @@ from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.4.1"
+VERSION = "1.4.2"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
@@ -691,6 +691,13 @@ class LiveWindowQt(QMainWindow):
             self._bridge = payload
             suggs = (payload or {}).get("suggestions") or []
             self._ct_suggestions = suggs
+            if payload and payload.get("online_error"):
+                err = str(payload["online_error"])
+                if len(err) > 64:
+                    err = err[:64] + "…"
+                self._set_status(
+                    f"⚠ Online lookup failed ({err}) — this list "
+                    f"came from my built-in book")
             if self._want_fill:
                 self._want_fill = False
                 if suggs:
