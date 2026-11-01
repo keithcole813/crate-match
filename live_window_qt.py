@@ -21,8 +21,8 @@ from PySide6.QtCore import QMimeData, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDrag, QFont
 from PySide6.QtWidgets import (
     QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
-    QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
-    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar,
+    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from analyzer import Library, scan_folder, analyze_file
@@ -33,40 +33,70 @@ from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.4.2"
+VERSION = "1.5.0"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
 
-# Serato-ish dark palette
-BG = "#1a1a1a"
-ROW_BG = "#2d2d2d"
-ROW_ALT = "#262626"
+# CrateMatch identity palette — near-black + signature gold. Applied
+# over Qt's Fusion style (set in main) so NOTHING renders with the
+# host OS theme: every control is drawn from this sheet (Keith:
+# "make it look unique instead of matching the os look").
+BG = "#141414"
+ROW_BG = "#2b2b2b"
+ROW_ALT = "#232323"
 FG = "#f5f5f5"
 DIM = "#9a9a9a"
 GOLD = "#f0cd6e"
-HEADER_BG = "#111111"
+GOLD_DARK = "#4a3f22"
+HEADER_BG = "#0d0d0d"
+EDGE = "#3d3d3d"
 
 APP_STYLE = f"""
 QMainWindow, QDialog, QWidget {{ background: {BG}; color: {FG};
     font-family: Helvetica; font-size: 13px; }}
 QLabel.dim {{ color: {DIM}; font-size: 11px; }}
 QLabel.gold {{ color: {GOLD}; font-size: 14px; font-weight: bold; }}
-QPushButton {{ background: {ROW_BG}; color: {FG}; border: 0;
-    padding: 6px 10px; }}
-QPushButton:hover {{ background: #3a3a3a; }}
-QComboBox {{ background: {ROW_BG}; color: {FG}; border: 0;
-    padding: 4px; }}
+QPushButton {{ background: {ROW_BG}; color: {FG};
+    border: 1px solid {EDGE}; border-radius: 6px;
+    padding: 6px 12px; }}
+QPushButton:hover {{ border-color: {GOLD}; color: {GOLD}; }}
+QPushButton:pressed {{ background: {GOLD_DARK}; }}
+QPushButton:disabled {{ color: {DIM}; border-color: {ROW_BG}; }}
+QComboBox {{ background: {ROW_BG}; color: {FG};
+    border: 1px solid {EDGE}; border-radius: 6px; padding: 4px 6px; }}
+QComboBox:hover {{ border-color: {GOLD}; }}
+QComboBox::drop-down {{ border: 0; width: 18px; }}
 QComboBox QAbstractItemView {{ background: {ROW_BG}; color: {FG};
-    border: 1px solid #444; selection-background-color: #4a3f22;
+    border: 1px solid {GOLD_DARK}; selection-background-color: {GOLD_DARK};
     selection-color: {FG}; outline: 0; }}
 QComboBox QAbstractItemView::item {{ padding: 4px 8px; }}
-QCheckBox {{ color: {FG}; spacing: 4px; }}
+QCheckBox {{ color: {FG}; spacing: 6px; }}
+QCheckBox::indicator {{ width: 16px; height: 16px;
+    border: 1px solid {EDGE}; border-radius: 4px; background: {ROW_BG}; }}
+QCheckBox::indicator:hover {{ border-color: {GOLD}; }}
+QCheckBox::indicator:checked {{ background: {GOLD};
+    border-color: {GOLD}; }}
+QProgressBar {{ background: {ROW_ALT}; border: 1px solid {EDGE};
+    border-radius: 5px; height: 10px; }}
+QProgressBar::chunk {{ background: {GOLD}; border-radius: 4px; }}
 QTableWidget {{ background: {ROW_BG}; color: {FG}; border: 0;
-    gridline-color: transparent; }}
-QTableWidget::item:selected {{ background: #4a3f22; }}
+    gridline-color: transparent; alternate-background-color: {ROW_ALT}; }}
+QTableWidget::item {{ padding: 2px 4px; }}
+QTableWidget::item:selected {{ background: {GOLD_DARK}; }}
 QHeaderView::section {{ background: {HEADER_BG}; color: {GOLD};
     border: 0; padding: 4px; font-weight: bold; }}
+QScrollBar:vertical {{ background: {BG}; width: 10px; margin: 0; }}
+QScrollBar::handle:vertical {{ background: #55491f; border-radius: 5px;
+    min-height: 30px; }}
+QScrollBar::handle:vertical:hover {{ background: {GOLD}; }}
+QScrollBar:horizontal {{ background: {BG}; height: 10px; margin: 0; }}
+QScrollBar::handle:horizontal {{ background: #55491f; border-radius: 5px;
+    min-width: 30px; }}
+QScrollBar::handle:horizontal:hover {{ background: {GOLD}; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+QToolTip {{ background: {ROW_BG}; color: {FG};
+    border: 1px solid {GOLD_DARK}; padding: 4px; }}
 """
 
 
@@ -195,9 +225,21 @@ class DownloadDialog(QDialog):
             self._row_btns.append(btn)
         lay.addWidget(self.table, 1)
 
+        prow = QHBoxLayout()
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        self.progress.setTextVisible(False)
+        prow.addWidget(self.progress, 1)
+        self.progress_label = QLabel("")
+        self.progress_label.setStyleSheet(f"color: {DIM};")
+        prow.addWidget(self.progress_label)
+        lay.addLayout(prow)
+
         all_btn = QPushButton("Download all")
         all_btn.clicked.connect(self._download_all)
         lay.addWidget(all_btn)
+        self._active_row = None
 
     def _change_dir(self):
         d = QFileDialog.getExistingDirectory(self, "Choose download folder")
@@ -218,6 +260,28 @@ class DownloadDialog(QDialog):
         item = self.table.item(i, 1)
         if item:
             item.setText(text)
+        if text.startswith("✅"):
+            if self._active_row == i:
+                self.progress.setRange(0, 100)
+                self.progress.setValue(100)
+                self.progress_label.setText("done")
+        elif text.startswith("❌"):
+            if self._active_row == i:
+                self.progress.setRange(0, 100)
+                self.progress.setValue(0)
+                self.progress_label.setText("failed")
+
+    def set_progress(self, i, pct):
+        self._active_row = i
+        self.set_row_status(i, f"⬇ {pct}%" if pct >= 0 else "⬇ …")
+        s = self.suggestions[i]
+        self.progress_label.setText(
+            f"{s['artist']} — {s['title']}"[:42])
+        if pct >= 0:
+            self.progress.setRange(0, 100)
+            self.progress.setValue(pct)
+        else:
+            self.progress.setRange(0, 0)
 
     def _download(self, i):
         if not self.download_dir or not os.path.isdir(self.download_dir):
@@ -237,34 +301,57 @@ class DownloadDialog(QDialog):
                 self._download(i)
 
     def _worker(self, i, sugg):
+        """Download via the yt-dlp LIBRARY (bundled in the app — the
+        old code shelled out to a 'yt-dlp' command that doesn't exist
+        inside the frozen app, hence Keith's 'no yt-dlp' status).
+        Progress hooks feed the dialog's progress bar."""
         artist, title = sugg["artist"], sugg["title"]
         query = f"{artist} {title}".strip()
-        fname = self._safe_filename(artist, title) + ".mp3"
-        outpath = os.path.join(self.download_dir, fname)
+        base = self._safe_filename(artist, title)
+        outpath = os.path.join(self.download_dir, base + ".mp3")
         q = self.parent_win.msg_q
+
+        def hook(d):
+            if d.get("status") == "downloading":
+                total = (d.get("total_bytes") or
+                         d.get("total_bytes_estimate") or 0)
+                done = d.get("downloaded_bytes") or 0
+                pct = int(done * 100 / total) if total else -1
+                q.put(("dl_progress", (i, pct)))
+            elif d.get("status") == "finished":
+                q.put(("dl_status", (i, "⏳ converting…")))
+
         try:
-            r = subprocess.run(
-                ["yt-dlp", f"ytsearch1:{query}", "--print", "%(id)s",
-                 "--no-playlist", "--quiet"],
-                capture_output=True, text=True, timeout=60)
-            vid = (r.stdout or "").strip().split("\n")[0].strip()
-            if not vid or r.returncode != 0:
-                raise RuntimeError("YouTube search found nothing")
-            r = subprocess.run(
-                ["yt-dlp", f"https://youtube.com/watch?v={vid}",
-                 "-x", "--audio-format", "mp3", "--audio-quality", "0",
-                 "-o", outpath, "--no-playlist", "--quiet", "--no-warnings"],
-                capture_output=True, text=True, timeout=600)
-            if r.returncode != 0 or not os.path.exists(outpath):
-                err = (r.stderr or "").strip().split("\n")[-1][:120]
-                raise RuntimeError(err or "download failed")
+            import yt_dlp
+            opts = {
+                "format": "bestaudio/best",
+                "outtmpl": os.path.join(self.download_dir,
+                                        base + ".%(ext)s"),
+                "postprocessors": [{
+                    "key": "FFmpegExtractAudio",
+                    "preferredcodec": "mp3",
+                    "preferredquality": "0",
+                }],
+                "noplaylist": True,
+                "quiet": True,
+                "no_warnings": True,
+                "progress_hooks": [hook],
+            }
+            try:
+                from analyzer import _ffmpeg_bin
+                ff = _ffmpeg_bin()
+                if ff:
+                    opts["ffmpeg_location"] = ff
+            except Exception:
+                pass
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                ydl.download([f"ytsearch1:{query}"])
+            if not os.path.exists(outpath):
+                raise RuntimeError("download produced no MP3")
             q.put(("download_done", (outpath, artist, title)))
             q.put(("dl_status", (i, "✅ in library")))
             q.put(("status_text",
                    f"Downloaded: {artist} — {title}"))
-        except FileNotFoundError:
-            q.put(("dl_status", (i, "❌ no yt-dlp")))
-            q.put(("status_text", "yt-dlp not found — pip install yt-dlp"))
         except Exception as e:
             q.put(("dl_status", (i, "❌ failed")))
             q.put(("status_text",
@@ -328,6 +415,17 @@ class LiveWindowQt(QMainWindow):
         self.setCentralWidget(central)
         lay = QVBoxLayout(central)
         lay.setContentsMargins(10, 10, 10, 10)
+
+        # brand wordmark — the identity moment at the top of the app
+        wm = QLabel("◆ CRATEMATCH LIVE")
+        wm.setStyleSheet(
+            f"color: {GOLD}; font-size: 16px; font-weight: bold; "
+            f"letter-spacing: 2px;")
+        lay.addWidget(wm)
+        rule = QWidget()
+        rule.setFixedHeight(2)
+        rule.setStyleSheet(f"background: {GOLD_DARK};")
+        lay.addWidget(rule)
 
         np_title = QLabel("NOW PLAYING")
         np_title.setStyleSheet(f"color: {DIM}; font-size: 11px;")
@@ -631,6 +729,10 @@ class LiveWindowQt(QMainWindow):
             if self._dl_dialog is not None:
                 i, text = payload
                 self._dl_dialog.set_row_status(i, text)
+        elif kind == "dl_progress":
+            if self._dl_dialog is not None:
+                i, pct = payload
+                self._dl_dialog.set_progress(i, pct)
         elif kind == "scan_status":
             self._set_status(payload)
         elif kind == "scan_done":
@@ -1142,7 +1244,19 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("CrateMatch Live")
     app.setApplicationVersion(VERSION)
+    # Fusion draws controls itself (no host-OS theme), so the
+    # identity stylesheet below fully owns the look.
+    app.setStyle("Fusion")
     app.setStyleSheet(APP_STYLE)
+    try:
+        from PySide6.QtGui import QIcon
+        icon_path = os.path.join(
+            getattr(sys, "_MEIPASS", os.path.dirname(
+                os.path.abspath(__file__))), "icon.png")
+        if os.path.exists(icon_path):
+            app.setWindowIcon(QIcon(icon_path))
+    except Exception:
+        pass
     try:
         w = LiveWindowQt()
     except Exception:
