@@ -33,7 +33,7 @@ from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.4.0"
+VERSION = "1.4.1"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
@@ -151,7 +151,7 @@ class MatchTable(QTableWidget):
 class DownloadDialog(QDialog):
     """One-click YouTube MP3 download for unowned pocket suggestions."""
 
-    def __init__(self, parent, suggestions, download_dir):
+    def __init__(self, parent, suggestions, download_dir, seed_label=""):
         super().__init__(parent)
         self.parent_win = parent
         self.suggestions = suggestions
@@ -161,7 +161,8 @@ class DownloadDialog(QDialog):
         self.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
 
         lay = QVBoxLayout(self)
-        hdr = QLabel(f"{len(suggestions)} tracks not in your library")
+        hdr = QLabel(f"{len(suggestions)} tracks not in your library"
+                     + (f" — like {seed_label}" if seed_label else ""))
         hdr.setProperty("class", "gold")
         hdr.setStyleSheet(f"color: {GOLD}; font-weight: bold;")
         lay.addWidget(hdr)
@@ -684,6 +685,9 @@ class LiveWindowQt(QMainWindow):
                     self._refresh_header()
                     self._rematch()
         elif kind == "bridge":
+            key, payload = payload
+            if key != self._current_bridge_key():
+                return  # stale lookup for a previous song — drop it
             self._bridge = payload
             suggs = (payload or {}).get("suggestions") or []
             self._ct_suggestions = suggs
@@ -752,6 +756,14 @@ class LiveWindowQt(QMainWindow):
             return
         if self.seed and seed.get("path") == self.seed.get("path"):
             return
+        # song changed: an open download list belongs to the old
+        # song — close it so stale suggestions never linger
+        if getattr(self, "_dl_dialog", None) is not None:
+            try:
+                self._dl_dialog.close()
+            except Exception:
+                pass
+            self._dl_dialog = None
         self.seed = seed
         self.seed_pocket = classify_pocket(seed)
         self._refresh_header()
@@ -810,6 +822,7 @@ class LiveWindowQt(QMainWindow):
 
     def _kick_bridge(self):
         seed = dict(self.seed)
+        key = self._current_bridge_key()
 
         def run():
             try:
@@ -817,7 +830,7 @@ class LiveWindowQt(QMainWindow):
                                          online=True)
             except Exception:
                 bridge = None
-            self.msg_q.put(("bridge", bridge))
+            self.msg_q.put(("bridge", (key, bridge)))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -1091,7 +1104,11 @@ class LiveWindowQt(QMainWindow):
                 "No download folder picked — click ⬇ Fill pocket "
                 "again when you're ready to choose one")
             return
-        self._dl_dialog = DownloadDialog(self, suggs, d)
+        seed_label = ""
+        if self.seed:
+            seed_label = (f"{self.seed.get('artist') or ''} — "
+                          f"{self.seed.get('title') or ''}")
+        self._dl_dialog = DownloadDialog(self, suggs, d, seed_label)
         self._dl_dialog.show()
 
     def _on_track_downloaded(self, path, artist, title):
