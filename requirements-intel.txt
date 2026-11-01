@@ -14,3 +14,6 @@ tkinterdnd2>=0.3.0
 
 # Qt window (v1.3.0+): universal2 wheel, macOS>=12 runtime
 PySide6-Essentials==6.8.3
+
+# CA bundle for in-app HTTPS (frozen macOS app has no CA store access)
+certifi>=2024.8.30
