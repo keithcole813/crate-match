@@ -33,7 +33,7 @@ from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.3.3"
+VERSION = "1.4.0"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
@@ -68,6 +68,10 @@ QTableWidget::item:selected {{ background: #4a3f22; }}
 QHeaderView::section {{ background: {HEADER_BG}; color: {GOLD};
     border: 0; padding: 4px; font-weight: bold; }}
 """
+
+
+def norm(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
 
 
 def load_settings():
@@ -283,6 +287,10 @@ class LiveWindowQt(QMainWindow):
         self.matches = []
         self.seed = None
         self.seed_pocket = None
+        self._ct_suggestions = []
+        self._bridge = None
+        self._bridge_key = None
+        self._want_fill = False
         self._scanning = False
         self._last_now = None
         self.msg_q = queue.Queue()
@@ -433,6 +441,10 @@ class LiveWindowQt(QMainWindow):
         s["show_downloads"] = bool(checked)
         save_settings(s)
         self.ct_btn.setVisible(bool(checked))
+        if not checked:
+            self._ct_suggestions = []
+            self._bridge = None
+            self._bridge_key = None
         if checked:
             self._set_status(
                 "Download suggestions on — ⬇ Fill pocket when a "
@@ -662,6 +674,30 @@ class LiveWindowQt(QMainWindow):
             # internet tag fill give it one so its pocket (and any
             # download suggestions) are based on a real genre
             self._start_tag_fill()
+        elif kind == "seed_tagged":
+            self.tracks = self.lib.all_tracks()
+            if self._last_now:
+                seed = self._find_seed(self._last_now)
+                if seed:
+                    self.seed = seed
+                    self.seed_pocket = classify_pocket(seed)
+                    self._refresh_header()
+                    self._rematch()
+        elif kind == "bridge":
+            self._bridge = payload
+            suggs = (payload or {}).get("suggestions") or []
+            self._ct_suggestions = suggs
+            if self._want_fill:
+                self._want_fill = False
+                if suggs:
+                    self._open_fill_dialog(suggs)
+                else:
+                    self._fill_empty_status()
+            elif payload and payload.get("thin") and suggs:
+                self._set_status(
+                    f"Pocket thin ({payload['library_count']} in "
+                    f"library) — ⬇ Fill pocket has {len(suggs)} "
+                    f"songs like this one")
         elif kind == "drop_done":
             self.tracks = self.lib.all_tracks()
             self._refresh_count_label()
@@ -719,6 +755,8 @@ class LiveWindowQt(QMainWindow):
         self.seed = seed
         self.seed_pocket = classify_pocket(seed)
         self._refresh_header()
+        if not (seed.get("genres") or "").strip():
+            self._tag_seed(seed)
         self._rematch()
 
     def _rematch(self):
@@ -753,22 +791,50 @@ class LiveWindowQt(QMainWindow):
                     f"(threshold {self.min_box.currentText()})")
         self._send_list_to_crate(manual=False)
         self._refresh_drop_folder()
-        # Fill-pocket suggestions: the button stays visible whenever
-        # Downloads is on (Keith: it vanished after one cancel and he
-        # couldn't find it again) — suggestions refresh per seed.
-        self._ct_suggestions = []
+        # Fill-pocket suggestions come from an async online lookup
+        # (never block the UI on the network — v1.2.3 lesson). Keyed
+        # by seed + genres so a fresh genre tag re-triggers it.
         if self.dl_check.isChecked():
+            if self._current_bridge_key() != self._bridge_key:
+                self._bridge_key = self._current_bridge_key()
+                self._kick_bridge()
+        else:
+            self._ct_suggestions = []
+
+    def _current_bridge_key(self):
+        if not self.seed:
+            return None
+        return (norm(self.seed.get("artist")),
+                norm(self.seed.get("title")),
+                (self.seed.get("genres") or "").strip().lower())
+
+    def _kick_bridge(self):
+        seed = dict(self.seed)
+
+        def run():
             try:
-                bridge = bridge_for_seed(self.seed, self.lib.db_path)
-                if bridge["suggestions"]:
-                    self._ct_suggestions = bridge["suggestions"]
-                    if bridge["thin"]:
-                        self._set_status(
-                            f"Pocket thin ({bridge['library_count']} in "
-                            f"library) — ⬇ Fill pocket has "
-                            f"{len(bridge['suggestions'])} downloads")
+                bridge = bridge_for_seed(seed, self.lib.db_path,
+                                         online=True)
+            except Exception:
+                bridge = None
+            self.msg_q.put(("bridge", bridge))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _tag_seed(self, seed):
+        """Tag JUST the now-playing track first (MusicBrainz) — the
+        general fill can take minutes; the seed is what matters now."""
+        def run():
+            try:
+                from genre_tagger import mb_search
+                g, y = mb_search(seed.get("artist"), seed.get("title"))
+                if g and seed.get("path"):
+                    self.lib.update_genres(seed["path"], g, y)
+                    self.msg_q.put(("seed_tagged", None))
             except Exception:
                 pass
+
+        threading.Thread(target=run, daemon=True).start()
 
     # ================= rendering =================
     def _energy_display(self, t):
@@ -984,29 +1050,41 @@ class LiveWindowQt(QMainWindow):
             self._set_status("Play a song first — then I can check "
                              "its pocket")
             return
-        bridge = None
-        try:
-            bridge = bridge_for_seed(self.seed, self.lib.db_path)
-        except Exception:
-            pass
-        suggs = (bridge or {}).get("suggestions") or \
-            getattr(self, "_ct_suggestions", [])
-        if not suggs:
-            if bridge and bridge.get("thin"):
-                self._set_status(
-                    f"Pocket's thin — only {bridge['library_count']} "
-                    f"in your library — but my suggestion book has "
-                    f"nothing for '{bridge['pocket']}' yet")
-            elif bridge:
-                self._set_status(
-                    f"Your library covers this pocket "
-                    f"({bridge['library_count']} songs) — no "
-                    f"downloads needed")
-            else:
-                self._set_status(
-                    "Couldn't check download suggestions for this "
-                    "song — try again in a moment")
+        if not self.dl_check.isChecked():
+            self._set_status(
+                "Downloads are off — tick the Downloads box to see "
+                "songs you don't own")
             return
+        if self._ct_suggestions:
+            self._open_fill_dialog(self._ct_suggestions)
+            return
+        if (self._bridge is not None and
+                self._bridge_key == self._current_bridge_key()):
+            self._fill_empty_status()
+            return
+        # nothing cached yet — look online now, open when it lands
+        self._want_fill = True
+        self._bridge_key = self._current_bridge_key()
+        self._kick_bridge()
+        self._set_status("Looking up songs like this one online…")
+
+    def _fill_empty_status(self):
+        b = self._bridge or {}
+        if b.get("thin"):
+            self._set_status(
+                f"Pocket's thin — only {b.get('library_count', 0)} "
+                f"in your library — and no similar songs turned up "
+                f"online for '{b.get('pocket', '')}' either")
+        elif b:
+            self._set_status(
+                f"No new songs to suggest — your library covers "
+                f"this pocket ({b.get('library_count', 0)} songs)")
+        else:
+            self._set_status(
+                "Couldn't look up suggestions — check the internet "
+                "connection and try again")
+
+    def _open_fill_dialog(self, suggs):
         d = self._get_download_dir()
         if not d:
             self._set_status(
