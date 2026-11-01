@@ -48,8 +48,8 @@ jobs:
       - name: Set bundle version (About / Get Info)
         run: |
           PLIST="dist/CrateMatch Live.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.3.2" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.3.2" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.3.2" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.3.2" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.3.3" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.3.3" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.3.3" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.3.3" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
 
       - name: Re-sign bundle after plist edit
@@ -59,7 +59,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          DMG="CrateMatch-Live-v1.3.2-macOS-Intel.dmg"
+          DMG="CrateMatch-Live-v1.3.3-macOS-Intel.dmg"
           rm -f "$DMG"
           hdiutil create -volname "CrateMatch Live" \
             -srcfolder "dist/CrateMatch Live.app" \
@@ -69,18 +69,18 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CrateMatch-Live-v1.3.2-macOS-Intel
-          path: CrateMatch-Live-v1.3.2-macOS-Intel.dmg
+          name: CrateMatch-Live-v1.3.3-macOS-Intel
+          path: CrateMatch-Live-v1.3.3-macOS-Intel.dmg
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.3.2-intel
-          name: CrateMatch Live v1.3.2 (Intel Mac)
-          files: CrateMatch-Live-v1.3.2-macOS-Intel.dmg
+          tag_name: v1.3.3-intel
+          name: CrateMatch Live v1.3.3 (Intel Mac)
+          files: CrateMatch-Live-v1.3.3-macOS-Intel.dmg
           body: |
             ## CrateMatch Live for Intel Macs
-            v1.3.2: window rebuilt in Qt — drag tracks onto Serato decks for real (file-URL drags), same matching brain (crates, pockets, Drop folder, tag fill). Bundle version now reports 1.3.2.
+            v1.3.3: stale downloads-status fix, seed auto-tagging, honest Fill-pocket messages, bigger suggestion book (pop, afrobeats, amapiano, latin, dance, country, rock).
             For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
             Download the DMG, open it, drag CrateMatch Live to Applications.
             Right-click > Open on first launch (unsigned app).
