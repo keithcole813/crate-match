@@ -34,10 +34,9 @@ def mb_search(artist, title, timeout=15):
     q = f'recording:"{title}" AND artist:"{artist}"'
     url = ("https://musicbrainz.org/ws/2/recording/?query=" +
            urllib.parse.quote(q) + "&fmt=json&limit=5")
-    req = urllib.request.Request(url, headers={"User-Agent": UA})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.load(resp)
+        from netutil import get_json
+        data = get_json(url, UA, timeout=timeout)
     except Exception:
         return None, None
     recs = data.get("recordings") or []
