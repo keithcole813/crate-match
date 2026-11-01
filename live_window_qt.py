@@ -20,9 +20,9 @@ import traceback
 from PySide6.QtCore import QMimeData, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDrag, QFont
 from PySide6.QtWidgets import (
-    QApplication, QComboBox, QDialog, QFileDialog, QHBoxLayout, QLabel,
-    QMainWindow, QMenu, QMessageBox, QPushButton, QTableWidget,
-    QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
+    QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QPushButton,
+    QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
 from analyzer import Library, scan_folder, analyze_file
@@ -33,7 +33,7 @@ from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
@@ -57,6 +57,11 @@ QPushButton {{ background: {ROW_BG}; color: {FG}; border: 0;
 QPushButton:hover {{ background: #3a3a3a; }}
 QComboBox {{ background: {ROW_BG}; color: {FG}; border: 0;
     padding: 4px; }}
+QComboBox QAbstractItemView {{ background: {ROW_BG}; color: {FG};
+    border: 1px solid #444; selection-background-color: #4a3f22;
+    selection-color: {FG}; outline: 0; }}
+QComboBox QAbstractItemView::item {{ padding: 4px 8px; }}
+QCheckBox {{ color: {FG}; spacing: 4px; }}
 QTableWidget {{ background: {ROW_BG}; color: {FG}; border: 0;
     gridline-color: transparent; }}
 QTableWidget::item:selected {{ background: #4a3f22; }}
@@ -285,6 +290,7 @@ class LiveWindowQt(QMainWindow):
         self._sort_rev = True
         _s = load_settings()
         self._min_setting = str(_s.get("min_score", "60"))
+        self._dl_setting = bool(_s.get("show_downloads", True))
         self.crate_index = None
         self._tag_filling = False
         self._analyzing_seeds = set()
@@ -332,34 +338,51 @@ class LiveWindowQt(QMainWindow):
         self.count_box = QComboBox()
         self.count_box.addItems(["10", "15", "20", "25"])
         self.count_box.setCurrentText("15")
+        self.count_box.setMinimumWidth(56)
         self.count_box.currentTextChanged.connect(lambda *_: self._rematch())
         ctl.addWidget(self.count_box)
         ctl.addWidget(QLabel("Key:"))
         self.key_box = QComboBox()
         self.key_box.addItems(["camelot", "classic", "openkey"])
+        self.key_box.setMinimumWidth(108)
         self.key_box.currentTextChanged.connect(
             lambda *_: (self._render(), self._refresh_header()))
         ctl.addWidget(self.key_box)
-        ctl.addWidget(QLabel("Min:"))
+        ctl.addWidget(QLabel("Threshold:"))
         self.min_box = QComboBox()
         self.min_box.addItems(["Off", "50", "55", "60", "65"])
         self.min_box.setCurrentText(self._min_setting)
+        self.min_box.setMinimumWidth(62)
         self.min_box.currentTextChanged.connect(
             lambda *_: self._on_min_changed())
         ctl.addWidget(self.min_box)
         ctl.addStretch(1)
+        self.lib_count_label = QLabel("")
+        self.lib_count_label.setStyleSheet(f"color: {DIM};")
+        ctl.addWidget(self.lib_count_label)
+        lay.addLayout(ctl)
+
+        ctl2 = QHBoxLayout()
+        self.dl_check = QCheckBox("Downloads")
+        self.dl_check.setChecked(self._dl_setting)
+        self.dl_check.setToolTip(
+            "Show songs you don't own that you could download "
+            "(turn off when DJing without internet)")
+        self.dl_check.toggled.connect(self._on_dl_toggled)
+        ctl2.addWidget(self.dl_check)
+        ctl2.addStretch(1)
         self.ct_btn = QPushButton("⬇ Fill pocket")
         self.ct_btn.clicked.connect(self._fill_pocket)
-        self.ct_btn.setVisible(False)
-        ctl.addWidget(self.ct_btn)
+        self.ct_btn.setVisible(self._dl_setting)
+        ctl2.addWidget(self.ct_btn)
         self.crate_btn = QPushButton("➡ Send list to crate")
         self.crate_btn.clicked.connect(
             lambda: self._send_list_to_crate(manual=True))
-        ctl.addWidget(self.crate_btn)
+        ctl2.addWidget(self.crate_btn)
         self.scan_btn = QPushButton("📁 Scan library")
         self.scan_btn.clicked.connect(self._scan_library)
-        ctl.addWidget(self.scan_btn)
-        lay.addLayout(ctl)
+        ctl2.addWidget(self.scan_btn)
+        lay.addLayout(ctl2)
 
         self.table = MatchTable()
         self.table.setColumnCount(len(self.COLS))
@@ -398,10 +421,22 @@ class LiveWindowQt(QMainWindow):
 
     # ================= data / threads =================
     def _refresh_count_label(self):
-        if self.lib.count() == 0:
+        n = self.lib.count()
+        self.lib_count_label.setText(f"Library: {n:,} songs")
+        if n == 0:
             self._set_status(
                 "No tracks indexed yet — click 📁 Scan library "
                 "and pick the folder your music is in")
+
+    def _on_dl_toggled(self, checked):
+        s = load_settings()
+        s["show_downloads"] = bool(checked)
+        save_settings(s)
+        self.ct_btn.setVisible(bool(checked))
+        if not checked:
+            self._set_status(
+                "Download suggestions off — library matches only")
+        self._rematch()
 
     def _build_history(self):
         try:
@@ -593,6 +628,7 @@ class LiveWindowQt(QMainWindow):
                     "pick the folder your music is in")
             else:
                 self.tracks = self.lib.all_tracks()
+                self._refresh_count_label()
                 msg = (f"Scan done: {self.lib.count()} tracks indexed "
                        f"({added} new)")
                 if failed:
@@ -620,6 +656,7 @@ class LiveWindowQt(QMainWindow):
                 self._handle_now_playing(self._last_now)
         elif kind == "drop_done":
             self.tracks = self.lib.all_tracks()
+            self._refresh_count_label()
             self._set_status(
                 f"Added {payload} dropped track(s) — "
                 f"{self.lib.count()} in library")
@@ -699,26 +736,31 @@ class LiveWindowQt(QMainWindow):
         if ms > 0:
             if not self.matches:
                 self._set_status(
-                    f"No confident matches (min "
-                    f"{self.min_box.currentText()}) — lower Min to see more")
+                    f"No confident matches (threshold "
+                    f"{self.min_box.currentText()}) — lower Threshold "
+                    f"to see more")
             elif len(self.matches) < n:
                 self._set_status(
                     f"{len(self.matches)} confident matches "
-                    f"(min {self.min_box.currentText()})")
+                    f"(threshold {self.min_box.currentText()})")
         self._send_list_to_crate(manual=False)
         self._refresh_drop_folder()
-        try:
-            bridge = bridge_for_seed(self.seed, self.lib.db_path)
-            if bridge["thin"] and bridge["suggestions"]:
-                self.ct_btn.setVisible(True)
-                self._ct_suggestions = bridge["suggestions"]
-                self._set_status(
-                    f"Pocket thin ({bridge['library_count']} in library) — "
-                    f"{len(bridge['suggestions'])} suggestions available")
-            else:
-                self.ct_btn.setVisible(False)
-        except Exception:
-            pass
+        # Fill-pocket suggestions: the button stays visible whenever
+        # Downloads is on (Keith: it vanished after one cancel and he
+        # couldn't find it again) — suggestions refresh per seed.
+        self._ct_suggestions = []
+        if self.dl_check.isChecked():
+            try:
+                bridge = bridge_for_seed(self.seed, self.lib.db_path)
+                if bridge["suggestions"]:
+                    self._ct_suggestions = bridge["suggestions"]
+                    if bridge["thin"]:
+                        self._set_status(
+                            f"Pocket thin ({bridge['library_count']} in "
+                            f"library) — ⬇ Fill pocket has "
+                            f"{len(bridge['suggestions'])} downloads")
+            except Exception:
+                pass
 
     # ================= rendering =================
     def _energy_display(self, t):
@@ -910,6 +952,7 @@ class LiveWindowQt(QMainWindow):
         t = self._row_tracks[row]
         self.lib.delete(t.get("path"))
         self.tracks = self.lib.all_tracks()
+        self._refresh_count_label()
         self._set_status(
             f"Removed: {t.get('artist')} — {t.get('title')}")
         self._rematch()
@@ -931,6 +974,9 @@ class LiveWindowQt(QMainWindow):
     def _fill_pocket(self):
         suggs = getattr(self, "_ct_suggestions", [])
         if not suggs:
+            self._set_status(
+                "No download suggestions for this song's pocket "
+                "right now — your library covers it")
             return
         d = self._get_download_dir()
         self._dl_dialog = DownloadDialog(self, suggs, d)
@@ -942,6 +988,7 @@ class LiveWindowQt(QMainWindow):
             if a:
                 self.lib.upsert(path, artist, title, a)
                 self.tracks = self.lib.all_tracks()
+                self._refresh_count_label()
                 self._rematch()
         except Exception as e:
             self._set_status(f"Analyze failed for {title}: {e}")
