@@ -43,13 +43,14 @@ jobs:
             --hidden-import librosa \
             --collect-all librosa \
             --collect-all numba \
+            --collect-all certifi \
             live_window_qt.py
 
       - name: Set bundle version (About / Get Info)
         run: |
           PLIST="dist/CrateMatch Live.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.4.1" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.4.1" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.4.1" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.4.1" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.4.2" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.4.2" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.4.2" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.4.2" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
 
       - name: Re-sign bundle after plist edit
@@ -59,7 +60,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          DMG="CrateMatch-Live-v1.4.1-macOS-Intel.dmg"
+          DMG="CrateMatch-Live-v1.4.2-macOS-Intel.dmg"
           rm -f "$DMG"
           hdiutil create -volname "CrateMatch Live" \
             -srcfolder "dist/CrateMatch Live.app" \
@@ -69,18 +70,18 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CrateMatch-Live-v1.4.1-macOS-Intel
-          path: CrateMatch-Live-v1.4.1-macOS-Intel.dmg
+          name: CrateMatch-Live-v1.4.2-macOS-Intel
+          path: CrateMatch-Live-v1.4.2-macOS-Intel.dmg
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.4.1-intel
-          name: CrateMatch Live v1.4.1 (Intel Mac)
-          files: CrateMatch-Live-v1.4.1-macOS-Intel.dmg
+          tag_name: v1.4.2-intel
+          name: CrateMatch Live v1.4.2 (Intel Mac)
+          files: CrateMatch-Live-v1.4.2-macOS-Intel.dmg
           body: |
             ## CrateMatch Live for Intel Macs
-            v1.4.1: suggestion fixes — genre-true pocket matching (no era collisions), stale lists killed, seed never suggests itself.
+            v1.4.2: in-app internet actually works (CA bundle fix for MusicBrainz + Deezer), lookup failures now shown, double-timed ballads stop ranking as tempo matches.
             For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
             Download the DMG, open it, drag CrateMatch Live to Applications.
             Right-click > Open on first launch (unsigned app).
