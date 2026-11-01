@@ -31,15 +31,17 @@ def key_compat(c1, c2):
 
 def _bpm_score(b1, b2):
     """BPM proximity with tempo folding: slow songs are routinely
-    detected at double tempo (68 read as 136), and DJs mix half/double
-    time anyway — so a folded match counts as near, with a small
-    penalty so a true-tempo match still wins."""
+    detected at double tempo (68 read as 136). A folded match is
+    possible to mix but is NOT the same pocket (Keith, v1.4.1 test:
+    Maxwell's double-timed ballad 'Fortunate' ranked beside uptempo
+    Destiny's Child) — so folding carries a real penalty (x0.70) and
+    a true-tempo match always wins."""
     if not b1 or not b2:
         return 0.4
     d = abs(b1 - b2)
     folded = min(abs(b1 - 2 * b2), abs(2 * b1 - b2))
     if folded < d:
-        return max(0.0, 1.0 - folded / 20.0) * 0.92
+        return max(0.0, 1.0 - folded / 20.0) * 0.70
     return max(0.0, 1.0 - d / 20.0)
 
 
