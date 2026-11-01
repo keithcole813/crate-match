@@ -269,13 +269,12 @@ def suggest_for_pocket(pocket_label, owned_keys, max_n=10):
     return out
 
 
+LAST_ONLINE_ERROR = None
+
+
 def _get_json(url, timeout=8):
-    import urllib.error
-    import urllib.request
-    req = urllib.request.Request(
-        url, headers={"User-Agent": "CrateMatchLive/1.4"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
-        return json.load(r)
+    from netutil import get_json
+    return get_json(url, "CrateMatchLive/1.4", timeout=timeout)
 
 
 def deezer_suggestions(seed_track, owned_keys, max_n=10):
@@ -295,6 +294,7 @@ def deezer_suggestions(seed_track, owned_keys, max_n=10):
     # only, so try progressively looser searches.
     primary = re.split(r"\s*(?:&|,|feat\.?|ft\.?|with)\s*", artist)[0]
     queries = [f"{artist} {title}", f"{primary} {title}", title]
+    global LAST_ONLINE_ERROR
     aid = None
     for query in queries:
         if not query.strip():
@@ -307,14 +307,16 @@ def deezer_suggestions(seed_track, owned_keys, max_n=10):
             if data:
                 aid = data[0]["artist"]["id"]
                 break
-        except Exception:
+        except Exception as e:
+            LAST_ONLINE_ERROR = str(e)
             continue
     if aid is None:
         return []
     try:
         radio = _get_json(f"https://api.deezer.com/artist/{aid}/radio"
                           f"?limit=40", timeout=12)
-    except Exception:
+    except Exception as e:
+        LAST_ONLINE_ERROR = str(e)
         return []
     seed_title_n = _norm(title)
     seed_artist_n = _norm(artist)
@@ -356,8 +358,13 @@ def bridge_for_seed(seed_track, db_path, thin_threshold=5, max_n=10,
     owned = library_keys(db_path)
     count = pocket_track_count(db_path, pocket_label)
     suggestions = []
+    online_error = None
     if online:
+        global LAST_ONLINE_ERROR
+        LAST_ONLINE_ERROR = None
         suggestions = deezer_suggestions(seed_track, owned, max_n)
+        if not suggestions and LAST_ONLINE_ERROR:
+            online_error = LAST_ONLINE_ERROR
     if len(suggestions) < max_n:
         have = {(_norm(s["artist"]), _norm(s["title"]))
                 for s in suggestions}
@@ -370,6 +377,7 @@ def bridge_for_seed(seed_track, db_path, thin_threshold=5, max_n=10,
         "library_count": count,
         "thin": count < thin_threshold,
         "suggestions": suggestions,
+        "online_error": online_error,
     }
 
 
