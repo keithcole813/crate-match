@@ -11,3 +11,6 @@ scikit-learn==1.5.2
 mutagen>=1.45.0
 yt-dlp>=2024.8.6
 tkinterdnd2>=0.3.0
+
+# Qt window (v1.3.0+): universal2 wheel, macOS>=12 runtime
+PySide6-Essentials==6.8.3
