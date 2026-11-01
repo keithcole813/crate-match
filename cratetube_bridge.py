@@ -246,17 +246,82 @@ def suggest_for_pocket(pocket_label, owned_keys, max_n=10):
     return out
 
 
-def bridge_for_seed(seed_track, db_path, thin_threshold=5, max_n=10):
-    """If the seed's pocket is thin in the library, suggest fill tracks.
+def _get_json(url, timeout=8):
+    import urllib.error
+    import urllib.request
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "CrateMatchLive/1.4"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
 
-    Returns {"pocket": label, "library_count": n, "suggestions": [...]}.
+
+def deezer_suggestions(seed_track, owned_keys, max_n=10):
+    """Songs like the seed, from Deezer's artist radio (no API key).
+
+    This is the similarity engine Keith asked for — the same class of
+    answer a web search gives ('songs that match X'): the seed
+    artist's radio mix of their own similar tracks + similar artists.
+    Returns [] on any failure so callers can fall back to the book.
+    """
+    import urllib.parse
+    artist = (seed_track.get("artist") or "").strip()
+    title = (seed_track.get("title") or "").strip()
+    if not artist:
+        return []
+    try:
+        q = urllib.parse.quote(f"{artist} {title}".strip())
+        d = _get_json(f"https://api.deezer.com/search/track?q={q}&limit=1")
+        data = d.get("data") or []
+        if not data:
+            return []
+        aid = data[0]["artist"]["id"]
+        radio = _get_json(f"https://api.deezer.com/artist/{aid}/radio"
+                          f"?limit=40")
+    except Exception:
+        return []
+    seed_key = (_norm(artist), _norm(title))
+    out, seen = [], set()
+    for t in radio.get("data") or []:
+        a = ((t.get("artist") or {}).get("name") or "").strip()
+        ti = (t.get("title") or "").strip()
+        k = (_norm(a), _norm(ti))
+        if not a or not ti or k in seen or k in owned_keys or k == seed_key:
+            continue
+        seen.add(k)
+        out.append({
+            "artist": a,
+            "title": ti,
+            "pocket": "similar",
+            "reason": f"Sounds like {artist} — {title}",
+        })
+        if len(out) >= max_n:
+            break
+    return out
+
+
+def bridge_for_seed(seed_track, db_path, thin_threshold=5, max_n=10,
+                    online=True):
+    """Suggest tracks the user doesn't own for the seed's pocket.
+
+    Online similarity (Deezer radio) first when allowed, the curated
+    book fills any remaining slots. Suggestions are computed whether
+    or not the pocket is thin — 'thin' is reported for messaging.
+    Returns {"pocket": label, "library_count": n, "thin": bool,
+    "suggestions": [...]}.
     """
     pocket_label = classify_pocket(seed_track)["label"]
     owned = library_keys(db_path)
     count = pocket_track_count(db_path, pocket_label)
     suggestions = []
-    if count < thin_threshold:
-        suggestions = suggest_for_pocket(pocket_label, owned, max_n)
+    if online:
+        suggestions = deezer_suggestions(seed_track, owned, max_n)
+    if len(suggestions) < max_n:
+        have = {(_norm(s["artist"]), _norm(s["title"]))
+                for s in suggestions}
+        for s in suggest_for_pocket(pocket_label, owned,
+                                    max_n - len(suggestions)):
+            if (_norm(s["artist"]), _norm(s["title"])) not in have:
+                suggestions.append(s)
     return {
         "pocket": pocket_label,
         "library_count": count,
