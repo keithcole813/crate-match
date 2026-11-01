@@ -84,6 +84,16 @@ KNOWLEDGE = {
         ("Beyonce", "Crazy in Love"),
         ("D'Angelo", "Brown Sugar"),
     ],
+    "90s r&b": [
+        ("TLC", "Creep"),
+        ("Aaliyah", "One in a Million"),
+        ("SWV", "Weak"),
+        ("En Vogue", "Don't Let Go (Love)"),
+        ("Mary J. Blige", "Real Love"),
+        ("Janet Jackson", "That's the Way Love Goes"),
+        ("Toni Braxton", "Un-Break My Heart"),
+        ("Blackstreet", "No Diggity"),
+    ],
     "soul": [
         ("Aretha Franklin", "Respect"),
         ("Otis Redding", "Sittin' On The Dock of the Bay"),
@@ -217,17 +227,30 @@ def _pocket_keywords(pocket_label):
     return pocket_label.lower()
 
 
+_ERA_WORDS = {"pre-60s", "60s", "70s", "80s", "90s", "2000s",
+              "2010s", "2020s"}
+
+
 def suggest_for_pocket(pocket_label, owned_keys, max_n=10):
-    """Return suggestion dicts for a pocket, excluding owned tracks."""
-    kw_words = set(_pocket_keywords(pocket_label).replace("/", " ").split())
+    """Return suggestion dicts for a pocket, excluding owned tracks.
+
+    Matching is on GENRE words only. Era words are a tiebreak, never
+    a match by themselves — the old any-word overlap let the era
+    word '90s' pull the 90s HIP-HOP list into an 'R&B / 90s' pocket
+    (Keith's v1.4.0 screenshot: Biggie and 2Pac offered for a Mariah
+    Carey ballad).
+    """
+    words = set(_pocket_keywords(pocket_label).replace("/", " ").split())
+    genre_words = words - _ERA_WORDS
+    era_words = words & _ERA_WORDS
     scored = []
     for pocket_kw, tracks in KNOWLEDGE.items():
-        kw2_words = set(pocket_kw.split())
-        overlap = kw_words & kw2_words
-        if not overlap:
+        kw2 = set(pocket_kw.split())
+        g_overlap = genre_words & (kw2 - _ERA_WORDS)
+        if not g_overlap:
             continue
-        # more shared words = more relevant
-        relevance = len(overlap)
+        relevance = (len(g_overlap) * 10 +
+                     len(era_words & (kw2 & _ERA_WORDS)))
         for artist, title in tracks:
             if (_norm(artist), _norm(title)) in owned_keys:
                 continue
@@ -268,24 +291,44 @@ def deezer_suggestions(seed_track, owned_keys, max_n=10):
     title = (seed_track.get("title") or "").strip()
     if not artist:
         return []
+    # Deezer sometimes credits collaborations to the lead artist
+    # only, so try progressively looser searches.
+    primary = re.split(r"\s*(?:&|,|feat\.?|ft\.?|with)\s*", artist)[0]
+    queries = [f"{artist} {title}", f"{primary} {title}", title]
+    aid = None
+    for query in queries:
+        if not query.strip():
+            continue
+        try:
+            q = urllib.parse.quote(query)
+            d = _get_json(
+                f"https://api.deezer.com/search/track?q={q}&limit=1")
+            data = d.get("data") or []
+            if data:
+                aid = data[0]["artist"]["id"]
+                break
+        except Exception:
+            continue
+    if aid is None:
+        return []
     try:
-        q = urllib.parse.quote(f"{artist} {title}".strip())
-        d = _get_json(f"https://api.deezer.com/search/track?q={q}&limit=1")
-        data = d.get("data") or []
-        if not data:
-            return []
-        aid = data[0]["artist"]["id"]
         radio = _get_json(f"https://api.deezer.com/artist/{aid}/radio"
-                          f"?limit=40")
+                          f"?limit=40", timeout=12)
     except Exception:
         return []
-    seed_key = (_norm(artist), _norm(title))
+    seed_title_n = _norm(title)
+    seed_artist_n = _norm(artist)
     out, seen = [], set()
     for t in radio.get("data") or []:
         a = ((t.get("artist") or {}).get("name") or "").strip()
         ti = (t.get("title") or "").strip()
         k = (_norm(a), _norm(ti))
-        if not a or not ti or k in seen or k in owned_keys or k == seed_key:
+        if not a or not ti or k in seen or k in owned_keys:
+            continue
+        # the seed itself, however Deezer credits it ('Mariah Carey'
+        # for a 'Mariah Carey & Boyz II Men' seed, etc.)
+        if k[1] == seed_title_n and (
+                k[0] in seed_artist_n or seed_artist_n in k[0]):
             continue
         seen.add(k)
         out.append({
