@@ -278,13 +278,22 @@ class Library:
     def count(self):
         return self.conn.execute("SELECT COUNT(*) FROM tracks").fetchone()[0]
 
-    def remove_missing(self, existing_paths):
-        """Drop rows whose files no longer exist."""
+    def remove_missing(self, existing_paths, scope=None):
+        """Drop rows whose files no longer exist. When scope (a folder)
+        is given, ONLY rows under that folder are pruned — v1.6.1:
+        scanning one small folder must never wipe the rest of the
+        library (Keith's append-only workflow depends on it)."""
         existing = set(existing_paths)
+        prefix = None
+        if scope:
+            prefix = os.path.normpath(scope) + os.sep
         cur = self.conn.execute("SELECT path FROM tracks")
         for (p,) in cur.fetchall():
-            if p not in existing:
-                self.conn.execute("DELETE FROM tracks WHERE path = ?", (p,))
+            if p in existing:
+                continue
+            if prefix and not os.path.normpath(p).startswith(prefix):
+                continue
+            self.conn.execute("DELETE FROM tracks WHERE path = ?", (p,))
         self.conn.commit()
 
 
@@ -345,7 +354,7 @@ def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
         for n in names:
             if os.path.splitext(n)[1].lower() in AUDIO_EXTS:
                 files.append(os.path.join(root, n))
-    lib.remove_missing(files)
+    lib.remove_missing(files, scope=folder)
     added = 0
     failed = 0
     for i, path in enumerate(files):
@@ -374,3 +383,44 @@ def scan_folder(lib, folder, artist_title_fn, progress_cb=None):
         lib.upsert(path, artist, title, a, genres, year)
         added += 1
     return added, len(files), failed
+
+
+def scan_files(lib, files, artist_title_fn, progress_cb=None):
+    """Analyze an explicit file list (the contents of one Serato
+    crate — 'Add from crate'). NO pruning: a crate is a view, not the
+    library's truth, so unlisted tracks keep their rows. Unchanged
+    files (same path + mtime) are skipped exactly like scan_folder.
+    Returns (added, total_listed, failed, missing) — missing counts
+    listed paths that are not audio files on disk anymore."""
+    todo = []
+    missing = 0
+    for p in files:
+        if os.path.isfile(p) and \
+                os.path.splitext(p)[1].lower() in AUDIO_EXTS:
+            todo.append(p)
+        else:
+            missing += 1
+    added = 0
+    failed = 0
+    for i, path in enumerate(todo):
+        if progress_cb:
+            progress_cb(i + 1, len(todo), os.path.basename(path))
+        row = lib.get(path)
+        mtime = os.path.getmtime(path)
+        meta = artist_title_fn(path)
+        artist, title = meta[0], meta[1]
+        genres = meta[2] if len(meta) > 2 else ""
+        year = meta[3] if len(meta) > 3 else None
+        if not genres:
+            genres = folder_genre(path)
+        if row and abs(row["mtime"] - mtime) < 1:
+            if not row.get("genres") and (genres or year):
+                lib.set_tags(path, genres, year)
+            continue
+        a = analyze_file(path)
+        if not a:
+            failed += 1
+            continue
+        lib.upsert(path, artist, title, a, genres, year)
+        added += 1
+    return added, len(files), failed, missing
