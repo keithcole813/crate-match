@@ -61,8 +61,8 @@ jobs:
       - name: Set bundle version (About / Get Info)
         run: |
           PLIST="dist/CrateMatch Live.app/Contents/Info.plist"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.6.0" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.6.0" "$PLIST"
-          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.6.0" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.6.0" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleVersion 1.6.1" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleVersion string 1.6.1" "$PLIST"
+          /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString 1.6.1" "$PLIST" 2>/dev/null || /usr/libexec/PlistBuddy -c "Add :CFBundleShortVersionString string 1.6.1" "$PLIST"
           /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST"
 
       - name: Re-sign bundle after plist edit
@@ -72,7 +72,7 @@ jobs:
 
       - name: Create DMG
         run: |
-          DMG="CrateMatch-Live-v1.6.0-macOS-Intel.dmg"
+          DMG="CrateMatch-Live-v1.6.1-macOS-Intel.dmg"
           rm -f "$DMG"
           hdiutil create -volname "CrateMatch Live" \
             -srcfolder "dist/CrateMatch Live.app" \
@@ -82,18 +82,18 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: CrateMatch-Live-v1.6.0-macOS-Intel
-          path: CrateMatch-Live-v1.6.0-macOS-Intel.dmg
+          name: CrateMatch-Live-v1.6.1-macOS-Intel
+          path: CrateMatch-Live-v1.6.1-macOS-Intel.dmg
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v1.6.0-intel
-          name: CrateMatch Live v1.6.0 (Intel Mac)
-          files: CrateMatch-Live-v1.6.0-macOS-Intel.dmg
+          tag_name: v1.6.1-intel
+          name: CrateMatch Live v1.6.1 (Intel Mac)
+          files: CrateMatch-Live-v1.6.1-macOS-Intel.dmg
           body: |
             ## CrateMatch Live for Intel Macs
-            v1.6.0: best-version pockets (Discogs styles headline the pocket, e.g. TRAP · GANGSTA), real Energy % and Danceability % from the database — baked into your library on the first scan so DJing works fully offline; new Collapse strip (shrinks in place, keeps showing your pocket, Restore button); "Download more" replaces the old Downloads toggle/Fill pocket. Optional: add a free Discogs token in the 🔑 keys dialog for the sharpest pocket names.
+            v1.6.1: all setup moves into a new ⚙ Settings menu at the top — Add from crate (analyze just one Serato crate's songs), Add from folder, one-click Rescan of your remembered folders, API keys, and OBS-style Window elements toggles (show or hide the Threshold slider, Show count, Key format, Download more, Library count, and the E%/D% columns). Scans are append-safe now: scanning a small folder can no longer prune the rest of the library, and unchanged songs are always skipped. Threshold is a slider with 1-point steps. 'Send list to crate' is gone — drag-and-drop to the deck replaced it. Everything from v1.6.0 stays: best-version pockets, database Energy %/Danceability % baked in for offline DJing, and the Collapse strip.
             For 2019 and earlier MacBook Pros (Intel i5/i7/i9), macOS 15.
             Download the DMG, open it, drag CrateMatch Live to Applications.
             Right-click > Open on first launch (unsigned app).
