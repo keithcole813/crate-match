@@ -17,7 +17,7 @@ import sys
 import threading
 import traceback
 
-from PySide6.QtCore import QMimeData, Qt, QTimer, QUrl
+from PySide6.QtCore import QByteArray, QMimeData, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDrag, QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog,
@@ -33,7 +33,7 @@ from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.6.1"
+VERSION = "1.6.2"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
@@ -418,6 +418,20 @@ class LiveWindowQt(QMainWindow):
             for _k in self._elements:
                 if _k in _saved_el:
                     self._elements[_k] = bool(_saved_el[_k])
+        # v1.6.2 (Keith): the window remembers — his sort choice…
+        _sv = _s.get("sort")
+        if isinstance(_sv, dict) and _sv.get("col") in self.COLS:
+            self._sort_col = _sv["col"]
+            self._sort_rev = bool(_sv.get("rev", True))
+        # …and his window size/place (saved on close, full view only,
+        # so quitting from the collapsed strip can't shrink it).
+        _geo = _s.get("win_geometry")
+        if _geo:
+            try:
+                self.restoreGeometry(
+                    QByteArray.fromBase64(str(_geo).encode()))
+            except Exception:
+                pass
         self.crate_index = None
         self._tag_filling = False
         self._baking = False
@@ -629,6 +643,25 @@ class LiveWindowQt(QMainWindow):
                   "energy": 44, "dance": 44, "score": 50}
         for i, c in enumerate(self.COLS):
             self.table.setColumnWidth(i, widths[c])
+        # v1.6.2: his column widths persist — stretch Title once and
+        # it stays stretched (Settings → Window elements hides/shows
+        # E%/D%; the width saved here is per column either way).
+        _saved_w = load_settings().get("col_widths")
+        if isinstance(_saved_w, list):
+            for i in range(min(len(_saved_w), len(self.COLS))):
+                try:
+                    _wv = int(_saved_w[i])
+                except (TypeError, ValueError):
+                    continue
+                if 24 <= _wv <= 1200:
+                    self.table.setColumnWidth(i, _wv)
+        self.table.horizontalHeader().sectionResized.connect(
+            self._on_section_resized)
+        self.table.horizontalHeader().setSortIndicatorShown(True)
+        self.table.horizontalHeader().setSortIndicator(
+            self.COLS.index(self._sort_col),
+            Qt.SortOrder.DescendingOrder if self._sort_rev
+            else Qt.SortOrder.AscendingOrder)
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(
@@ -1397,12 +1430,25 @@ class LiveWindowQt(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     # ================= rendering =================
+    def _on_section_resized(self, *_):
+        s = load_settings()
+        s["col_widths"] = [self.table.columnWidth(i)
+                           for i in range(len(self.COLS))]
+        save_settings(s)
+
     def _sort_by(self, col_idx):
         col = self.COLS[col_idx]
         if self._sort_col == col:
             self._sort_rev = not self._sort_rev
         else:
             self._sort_col, self._sort_rev = col, col == "score"
+        # v1.6.2: his sort persists across launches, arrow included.
+        self.table.horizontalHeader().setSortIndicator(
+            col_idx, Qt.SortOrder.DescendingOrder if self._sort_rev
+            else Qt.SortOrder.AscendingOrder)
+        s = load_settings()
+        s["sort"] = {"col": self._sort_col, "rev": self._sort_rev}
+        save_settings(s)
         self._render()
 
     def _row_values(self, score, t):
@@ -1638,6 +1684,16 @@ class LiveWindowQt(QMainWindow):
     # ================= lifecycle =================
     def closeEvent(self, event):
         self._closing = True
+        # v1.6.2: remember the window's size/place — but never let
+        # the collapsed strip's slim geometry overwrite the full one.
+        if not self._collapsed:
+            try:
+                s = load_settings()
+                s["win_geometry"] = bytes(
+                    self.saveGeometry().toBase64()).decode()
+                save_settings(s)
+            except Exception:
+                pass
         try:
             self.watcher.stop()
         except Exception:
