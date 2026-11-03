@@ -67,6 +67,29 @@ def _parse_genres(track):
     return []
 
 
+def _split_field(v):
+    if isinstance(v, str):
+        return [x.strip() for x in v.split(";") if x.strip()]
+    return []
+
+
+def _all_genres(track):
+    """Genre families from every source, deduped, order preserved:
+    file/MusicBrainz tags first, then the baked-in database genres
+    (Discogs/TheAudioDB, v1.6.0)."""
+    out = []
+    for g in _parse_genres(track) + \
+            [x.lower() for x in _split_field(track.get("db_genres"))]:
+        if g not in out:
+            out.append(g)
+    return out
+
+
+def _styles(track):
+    """Discogs styles (most specific pocket words), display case."""
+    return _split_field(track.get("pocket_styles"))
+
+
 def _era_of(track):
     """Bucket a year into an era label."""
     y = track.get("year")
@@ -95,8 +118,18 @@ _ERA_ORDER = ["pre-60s", "60s", "70s", "80s", "90s", "2000s", "2010s", "2020s"]
 
 
 def classify_pocket(track):
-    """Return {genres, primary_genre, era, label} for a track dict."""
-    genres = _parse_genres(track)
+    """Return {genres, primary_genre, era, label, styles, headline,
+    detail} for a track dict.
+
+    headline/detail are the v1.6.0 BEST-VERSION pocket display: the
+    most specific version of the pocket (Discogs styles headline,
+    genre families + era as the detail line), per Keith's ruling —
+    e.g. headline 'LATIN TRAP · BOOGALOO', detail 'Hip Hop / Latin ·
+    Salsa · 2010s (2018)'. label keeps the old primary/era form for
+    pocket_counts and other legacy uses.
+    """
+    genres = _all_genres(track)
+    styles = _styles(track)
     era = _era_of(track)
     primary = genres[0] if genres else None
     parts = []
@@ -105,18 +138,71 @@ def classify_pocket(track):
     if era:
         parts.append(era)
     label = " / ".join(parts) if parts else "Unknown pocket"
+    headline, detail = _pocket_display(genres, styles, era,
+                                       track.get("year"))
     return {
         "genres": genres,
         "primary_genre": primary,
         "era": era,
         "label": label,
+        "styles": styles,
+        "headline": headline,
+        "detail": detail,
     }
 
 
+def _pocket_display(genres, styles, era, year):
+    """Compose (headline, detail) from genre families + styles."""
+    fams = [g.title() for g in genres]
+    stys = [s.title() for s in styles]
+    used = set()
+    if len(fams) >= 2 and stys:
+        # cross-family record: family #2 flavors style #1, and the
+        # last style is the distinctive one (I Like It: genres
+        # Hip Hop+Latin, styles Trap/Salsa/Boogaloo ->
+        # 'LATIN TRAP · BOOGALOO')
+        headline = f"{fams[1]} {stys[0]}"
+        used.add(stys[0])
+        if len(stys) >= 2 and stys[-1] != stys[0]:
+            headline += f" · {stys[-1]}"
+            used.add(stys[-1])
+    elif len(stys) >= 2:
+        headline = f"{stys[0]} · {stys[1]}"
+        used.update(stys[:2])
+    elif stys:
+        headline = stys[0]
+        used.add(stys[0])
+    elif len(fams) >= 2:
+        headline = f"{fams[0]} · {fams[1]}"
+    elif fams:
+        headline = fams[0]
+    else:
+        headline = "Unknown pocket"
+    detail_parts = []
+    if fams:
+        detail_parts.append(" / ".join(fams))
+    rest = [s for s in stys if s not in used]
+    if rest:
+        detail_parts.append(" · ".join(rest))
+    if era and year:
+        detail_parts.append(f"{era} ({year})")
+    elif era:
+        detail_parts.append(era)
+    elif year:
+        detail_parts.append(f"({year})")
+    return headline.upper(), " · ".join(detail_parts)
+
+
 def pocket_match(seed_pocket, cand_pocket):
-    """0..1 — how well the candidate sits in the seed's pocket."""
-    sg = set(seed_pocket.get("genres") or [])
-    cg = set(cand_pocket.get("genres") or [])
+    """0..1 — how well the candidate sits in the seed's pocket.
+    Scores against the FULL merged tag set (genres + Discogs styles)
+    per Keith's v1.6.0 ruling."""
+    def tagset(p):
+        s = set(p.get("genres") or [])
+        s.update(x.strip().lower() for x in (p.get("styles") or []))
+        return s
+    sg = tagset(seed_pocket)
+    cg = tagset(cand_pocket)
     if sg and cg:
         inter = sg & cg
         union = sg | cg
