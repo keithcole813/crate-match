@@ -22,19 +22,18 @@ from PySide6.QtGui import QAction, QDrag, QFont
 from PySide6.QtWidgets import (
     QApplication, QComboBox, QDialog, QFileDialog,
     QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
-    QProgressBar, QPushButton, QTableWidget, QTableWidgetItem,
-    QVBoxLayout, QWidget,
+    QProgressBar, QPushButton, QSlider, QTableWidget, QTableWidgetItem,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
-from analyzer import Library, scan_folder, analyze_file
-from crate_io import write_crate
-from crates import load_crate_index
+from analyzer import Library, scan_files, scan_folder, analyze_file
+from crates import list_crates, load_crate_index
 from history import HistoryGraph
 from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.6.0"
+VERSION = "1.6.1"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
@@ -78,6 +77,26 @@ QCheckBox::indicator {{ width: 16px; height: 16px;
 QCheckBox::indicator:hover {{ border-color: {GOLD}; }}
 QCheckBox::indicator:checked {{ background: {GOLD};
     border-color: {GOLD}; }}
+QToolButton {{ background: {ROW_BG}; color: {FG};
+    border: 1px solid {EDGE}; border-radius: 6px;
+    padding: 6px 12px; }}
+QToolButton:hover {{ border-color: {GOLD}; color: {GOLD}; }}
+QToolButton::menu-indicator {{ image: none; width: 0; }}
+QMenu {{ background: {ROW_BG}; color: {FG};
+    border: 1px solid {GOLD_DARK}; padding: 4px; }}
+QMenu::item {{ padding: 6px 22px 6px 12px; border-radius: 4px; }}
+QMenu::item:selected {{ background: {GOLD_DARK}; }}
+QMenu::item:disabled {{ color: {DIM}; }}
+QMenu::separator {{ height: 1px; background: {EDGE};
+    margin: 4px 8px; }}
+QMenu::indicator {{ width: 14px; height: 14px; }}
+QSlider::groove:horizontal {{ height: 6px; background: {ROW_ALT};
+    border: 1px solid {EDGE}; border-radius: 3px; }}
+QSlider::sub-page:horizontal {{ background: {GOLD_DARK};
+    border-radius: 3px; }}
+QSlider::handle:horizontal {{ background: {GOLD}; width: 14px;
+    margin: -5px 0; border-radius: 7px;
+    border: 1px solid {GOLD_DARK}; }}
 QProgressBar {{ background: {ROW_ALT}; border: 1px solid {EDGE};
     border-radius: 5px; height: 10px; }}
 QProgressBar::chunk {{ background: {GOLD}; border-radius: 4px; }}
@@ -387,7 +406,18 @@ class LiveWindowQt(QMainWindow):
         self._sort_col = "score"
         self._sort_rev = True
         _s = load_settings()
-        self._min_setting = str(_s.get("min_score", "60"))
+        self._min_value = self._parse_min_setting(
+            _s.get("min_score", "60"))
+        # OBS-style window elements (Keith, v1.6.1): what shows in the
+        # window is his choice, set in Settings → Window elements.
+        self._elements = {"show": True, "key": True, "threshold": True,
+                          "download": True, "library": True,
+                          "energy": True, "dance": True}
+        _saved_el = _s.get("ui_elements")
+        if isinstance(_saved_el, dict):
+            for _k in self._elements:
+                if _k in _saved_el:
+                    self._elements[_k] = bool(_saved_el[_k])
         self.crate_index = None
         self._tag_filling = False
         self._baking = False
@@ -395,12 +425,12 @@ class LiveWindowQt(QMainWindow):
         self._collapsed = False
         self._pre_collapse_size = None
         self._analyzing_seeds = set()
-        self._last_crate_sig = None
         self._last_drop_sig = None
         self._drop_announced = False
         self._dl_dialog = None
 
         self._build()
+        self._apply_elements()
         self._refresh_count_label()
 
         self.watcher = SeratoWatcher(self._on_watcher, interval=2.0)
@@ -460,6 +490,44 @@ class LiveWindowQt(QMainWindow):
             f"letter-spacing: 2px;")
         wm_row.addWidget(wm)
         wm_row.addStretch(1)
+        # ⚙ Settings (v1.6.1, Keith): ALL setup lives here — adding
+        # music, rescans, API keys, which elements the window shows.
+        # The main window keeps only live controls.
+        self.settings_btn = QToolButton()
+        self.settings_btn.setText("⚙ Settings")
+        self.settings_btn.setToolTip(
+            "Setup: add music, rescan, API keys, window elements")
+        _menu = QMenu(self.settings_btn)
+        self.act_add_crate = _menu.addAction("Add from crate…")
+        self.act_add_crate.triggered.connect(self._add_from_crate)
+        self.act_add_folder = _menu.addAction("Add from folder…")
+        self.act_add_folder.triggered.connect(self._scan_library)
+        self.act_rescan = _menu.addAction("Rescan my folders")
+        self.act_rescan.triggered.connect(self._rescan_folders)
+        self._scan_actions = [self.act_add_crate, self.act_add_folder,
+                              self.act_rescan]
+        _menu.addSeparator()
+        _act_keys = _menu.addAction("API keys…")
+        _act_keys.triggered.connect(self._open_keys_dialog)
+        _elem_menu = _menu.addMenu("Window elements")
+        self._element_actions = {}
+        _elem_labels = {"show": "Show count", "key": "Key format",
+                        "threshold": "Threshold slider",
+                        "download": "Download more button",
+                        "library": "Library count",
+                        "energy": "E% column", "dance": "D% column"}
+        for _k in ("show", "key", "threshold", "download", "library",
+                   "energy", "dance"):
+            _a = _elem_menu.addAction(_elem_labels[_k])
+            _a.setCheckable(True)
+            _a.setChecked(bool(self._elements.get(_k, True)))
+            _a.toggled.connect(
+                lambda on, k=_k: self._toggle_element(k, on))
+            self._element_actions[_k] = _a
+        self.settings_btn.setMenu(_menu)
+        self.settings_btn.setPopupMode(
+            QToolButton.ToolButtonPopupMode.InstantPopup)
+        wm_row.addWidget(self.settings_btn)
         collapse_btn = QPushButton("▼ Collapse")
         collapse_btn.setToolTip(
             "Shrink to a slim strip that still shows your pocket — "
@@ -495,28 +563,41 @@ class LiveWindowQt(QMainWindow):
         lay.addWidget(self.pocket_label)
 
         ctl = QHBoxLayout()
-        ctl.addWidget(QLabel("Show:"))
+        self.show_label = QLabel("Show:")
+        ctl.addWidget(self.show_label)
         self.count_box = QComboBox()
         self.count_box.addItems(["10", "15", "20", "25"])
         self.count_box.setCurrentText("15")
         self.count_box.setMinimumWidth(56)
         self.count_box.currentTextChanged.connect(lambda *_: self._rematch())
         ctl.addWidget(self.count_box)
-        ctl.addWidget(QLabel("Key:"))
+        self.key_label = QLabel("Key:")
+        ctl.addWidget(self.key_label)
         self.key_box = QComboBox()
         self.key_box.addItems(["camelot", "classic", "openkey"])
         self.key_box.setMinimumWidth(108)
         self.key_box.currentTextChanged.connect(
             lambda *_: (self._render(), self._refresh_header()))
         ctl.addWidget(self.key_box)
-        ctl.addWidget(QLabel("Threshold:"))
-        self.min_box = QComboBox()
-        self.min_box.addItems(["Off", "50", "55", "60", "65"])
-        self.min_box.setCurrentText(self._min_setting)
-        self.min_box.setMinimumWidth(62)
-        self.min_box.currentTextChanged.connect(
+        self.thr_label = QLabel("Threshold:")
+        ctl.addWidget(self.thr_label)
+        # v1.6.1 (Keith): a slider with 1-point steps, not the old
+        # preset menu (Off/50/55/60/65). All the way left = Off.
+        self.min_slider = QSlider(Qt.Orientation.Horizontal)
+        self.min_slider.setRange(0, 95)
+        self.min_slider.setSingleStep(1)
+        self.min_slider.setPageStep(5)
+        self.min_slider.setValue(self._min_value)
+        self.min_slider.setFixedWidth(104)
+        self.min_slider.setToolTip(
+            "Lowest match score to show — 1-point steps; "
+            "all the way left is Off")
+        self.min_slider.valueChanged.connect(
             lambda *_: self._on_min_changed())
-        ctl.addWidget(self.min_box)
+        ctl.addWidget(self.min_slider)
+        self.min_value_label = QLabel(self._min_text())
+        self.min_value_label.setMinimumWidth(26)
+        ctl.addWidget(self.min_value_label)
         ctl.addStretch(1)
         self.lib_count_label = QLabel("")
         self.lib_count_label.setStyleSheet(f"color: {DIM};")
@@ -535,19 +616,9 @@ class LiveWindowQt(QMainWindow):
             "Songs like this one that you don't own yet")
         self.ct_btn.clicked.connect(self._fill_pocket)
         ctl2.addWidget(self.ct_btn)
-        self.crate_btn = QPushButton("➡ Send list to crate")
-        self.crate_btn.clicked.connect(
-            lambda: self._send_list_to_crate(manual=True))
-        ctl2.addWidget(self.crate_btn)
-        self.scan_btn = QPushButton("📁 Scan library")
-        self.scan_btn.clicked.connect(self._scan_library)
-        ctl2.addWidget(self.scan_btn)
-        self.keys_btn = QPushButton("🔑")
-        self.keys_btn.setToolTip(
-            "API keys (Discogs token, TheAudioDB key) — entered once, "
-            "they power the offline numbers bake-in")
-        self.keys_btn.clicked.connect(self._open_keys_dialog)
-        ctl2.addWidget(self.keys_btn)
+        # v1.6.1 (Keith): 'Send list to crate' is GONE — drag-and-drop
+        # replaced it. Scan library and the API-keys button moved up
+        # into ⚙ Settings; this row is live actions only.
         lay.addLayout(ctl2)
 
         self.table = MatchTable()
@@ -591,8 +662,8 @@ class LiveWindowQt(QMainWindow):
         self.lib_count_label.setText(f"Library: {n:,} songs")
         if n == 0:
             self._set_status(
-                "No tracks indexed yet — click 📁 Scan library "
-                "and pick the folder your music is in")
+                "No tracks indexed yet — open ⚙ Settings → "
+                "Add from folder and pick the folder your music is in")
 
     def _set_collapsed(self, collapsed):
         """Collapse to the slim strip (NOT minimize): the strip keeps
@@ -672,21 +743,62 @@ class LiveWindowQt(QMainWindow):
         except Exception:
             pass
 
+    @staticmethod
+    def _parse_min_setting(v):
+        """Settings migration: through v1.6.0 min_score was text
+        ('Off'/'50'…'65'); the v1.6.1 slider stores a number 0..95."""
+        if isinstance(v, (int, float)):
+            n = int(v)
+        elif str(v).strip().lower() == "off":
+            return 0
+        else:
+            try:
+                n = int(float(str(v).strip()))
+            except (TypeError, ValueError):
+                return 60
+        return max(0, min(95, n))
+
     def _min_score(self):
-        v = self.min_box.currentText() if hasattr(self, "min_box") \
-            else self._min_setting
-        if v == "Off":
-            return 0.0
-        try:
-            return int(v) / 100.0
-        except ValueError:
-            return 0.60
+        if hasattr(self, "min_slider"):
+            return self.min_slider.value() / 100.0
+        return self._min_value / 100.0
+
+    def _min_text(self):
+        v = self.min_slider.value() if hasattr(self, "min_slider") \
+            else self._min_value
+        return "Off" if v == 0 else str(v)
 
     def _on_min_changed(self):
+        v = self.min_slider.value()
+        self.min_value_label.setText("Off" if v == 0 else str(v))
         s = load_settings()
-        s["min_score"] = self.min_box.currentText()
+        s["min_score"] = v
         save_settings(s)
         self._rematch()
+
+    # ================= window elements (OBS-style) =================
+    def _apply_elements(self):
+        el = self._elements
+        self.show_label.setVisible(el["show"])
+        self.count_box.setVisible(el["show"])
+        self.key_label.setVisible(el["key"])
+        self.key_box.setVisible(el["key"])
+        self.thr_label.setVisible(el["threshold"])
+        self.min_slider.setVisible(el["threshold"])
+        self.min_value_label.setVisible(el["threshold"])
+        self.ct_btn.setVisible(el["download"])
+        self.lib_count_label.setVisible(el["library"])
+        self.table.setColumnHidden(self.COLS.index("energy"),
+                                   not el["energy"])
+        self.table.setColumnHidden(self.COLS.index("dance"),
+                                   not el["dance"])
+
+    def _toggle_element(self, key, on):
+        self._elements[key] = bool(on)
+        s = load_settings()
+        s["ui_elements"] = dict(self._elements)
+        save_settings(s)
+        self._apply_elements()
 
     @staticmethod
     def _energy_pct(t):
@@ -820,31 +932,145 @@ class LiveWindowQt(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     # ================= scan =================
+    def _set_scan_ui_enabled(self, on):
+        for a in getattr(self, "_scan_actions", []):
+            a.setEnabled(on)
+
+    def _remember_folder(self, folder):
+        s = load_settings()
+        folders = [f for f in (s.get("music_folders") or [])
+                   if f != folder]
+        folders.insert(0, folder)
+        s["music_folders"] = folders[:8]
+        save_settings(s)
+
     def _scan_library(self):
+        """Settings → Add from folder… (was the Scan library button)."""
         if self._scanning:
             return
+        start = (load_settings().get("music_folders") or
+                 [os.path.expanduser("~/Music")])[0]
         folder = QFileDialog.getExistingDirectory(
             self, "Pick your music folder (the big one, e.g. Music)",
-            os.path.expanduser("~/Music"))
+            start)
         if not folder:
             return
+        self._remember_folder(folder)
+        self._run_scan([folder])
+
+    def _rescan_folders(self):
+        """Settings → Rescan my folders: one click over every folder
+        ever added. Unchanged songs are skipped, so this is the
+        append flow — only new files analyze."""
+        if self._scanning:
+            return
+        folders = [f for f in
+                   (load_settings().get("music_folders") or [])
+                   if os.path.isdir(f)]
+        if not folders:
+            self._set_status(
+                "No folders remembered yet — use Settings → "
+                "Add from folder once and I'll remember it")
+            return
+        self._run_scan(folders)
+
+    def _run_scan(self, folders):
         self._scanning = True
-        self.scan_btn.setEnabled(False)
-        self._set_status(f"Scanning {folder}…")
+        self._set_scan_ui_enabled(False)
+        if len(folders) == 1:
+            self._set_status(f"Scanning {folders[0]}…")
+        else:
+            self._set_status(f"Scanning {len(folders)} folders…")
 
         def run():
             try:
-                def prog(i, n, name):
-                    self.msg_q.put(("scan_status",
-                                    f"Analyzing {i}/{n}: {name[:40]}"))
-                added, total, failed = scan_folder(
-                    self.lib, folder, artist_title_from_file, prog)
+                added = total = failed = 0
+                for folder in folders:
+                    def prog(i, n, name):
+                        self.msg_q.put(("scan_status",
+                                        f"Analyzing {i}/{n}: "
+                                        f"{name[:40]}"))
+                    a, t, fl = scan_folder(
+                        self.lib, folder, artist_title_from_file, prog)
+                    added += a
+                    total += t
+                    failed += fl
                 self.msg_q.put(("scan_done", (added, total, failed, None)))
             except Exception:
                 tb = traceback.format_exc()
                 try:
                     with open(ERROR_LOG, "a") as f:
                         f.write("SCAN FAILED\n" + tb + "\n---\n")
+                except Exception:
+                    pass
+                last = tb.strip().splitlines()[-1] if tb.strip() else "error"
+                self.msg_q.put(("scan_done", (0, 0, 0, last)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _add_from_crate(self):
+        """Settings → Add from crate…: Keith's Serato intake flow —
+        he drops new songs into a crate; this analyzes and adds just
+        that crate's songs, skipping ones already in the library."""
+        if self._scanning:
+            return
+        try:
+            crates = [(n, ps) for (n, ps) in list_crates() if ps]
+        except Exception:
+            crates = []
+        if not crates:
+            self._set_status(
+                "No Serato crates found — crates live in the _Serato_ "
+                "folders on your drives")
+            return
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Add from crate")
+        dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        lay = QVBoxLayout(dlg)
+        note = QLabel(
+            "Adds the songs in one Serato crate to the library. "
+            "Songs already in are skipped, and nothing else in the "
+            "library is touched.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {DIM};")
+        lay.addWidget(note)
+        box = QComboBox()
+        for name, paths in crates:
+            box.addItem(f"{name} ({len(paths)})", paths)
+        lay.addWidget(box)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        add = QPushButton("Add crate")
+        row.addWidget(add)
+        lay.addLayout(row)
+        chosen = {}
+
+        def do_add():
+            chosen["paths"] = box.currentData()
+            dlg.accept()
+
+        add.clicked.connect(do_add)
+        if not dlg.exec() or not chosen.get("paths"):
+            return
+        paths = chosen["paths"]
+        self._scanning = True
+        self._set_scan_ui_enabled(False)
+        self._set_status(f"Adding crate: {len(paths)} songs listed…")
+
+        def run():
+            try:
+                def prog(i, n, name):
+                    self.msg_q.put(("scan_status",
+                                    f"Analyzing {i}/{n}: {name[:40]}"))
+                added, total, failed, missing = scan_files(
+                    self.lib, paths, artist_title_from_file, prog)
+                self.msg_q.put(("scan_done",
+                                (added, total, failed + missing, None)))
+            except Exception:
+                tb = traceback.format_exc()
+                try:
+                    with open(ERROR_LOG, "a") as f:
+                        f.write("CRATE ADD FAILED\n" + tb + "\n---\n")
                 except Exception:
                     pass
                 last = tb.strip().splitlines()[-1] if tb.strip() else "error"
@@ -910,7 +1136,7 @@ class LiveWindowQt(QMainWindow):
         elif kind == "scan_done":
             added, total, failed, err = payload
             self._scanning = False
-            self.scan_btn.setEnabled(True)
+            self._set_scan_ui_enabled(True)
             if err:
                 self._set_status(f"Scan failed: {err}")
             elif total == 0:
@@ -1100,13 +1326,12 @@ class LiveWindowQt(QMainWindow):
             if not self.matches:
                 self._set_status(
                     f"No confident matches (threshold "
-                    f"{self.min_box.currentText()}) — lower Threshold "
+                    f"{self._min_text()}) — lower Threshold "
                     f"to see more")
             elif len(self.matches) < n:
                 self._set_status(
                     f"{len(self.matches)} confident matches "
-                    f"(threshold {self.min_box.currentText()})")
-        self._send_list_to_crate(manual=False)
+                    f"(threshold {self._min_text()})")
         self._refresh_drop_folder()
         # Download-more suggestions come from an async online lookup
         # (never block the UI on the network — v1.2.3 lesson). Keyed
@@ -1215,36 +1440,10 @@ class LiveWindowQt(QMainWindow):
             self._row_tracks.append(t)
             self._row_paths[i] = t.get("path")
 
-    # ================= crate send + drop folder =================
-    @staticmethod
-    def _crate_target_path():
-        music = os.path.expanduser("~/Music")
-        for sub in ("Subcrates", "Crates"):
-            d = os.path.join(music, "_Serato_", sub)
-            if os.path.isdir(d):
-                return os.path.join(d, "CrateMatch Live.crate")
-        d = os.path.join(music, "_Serato_", "Subcrates")
-        os.makedirs(d, exist_ok=True)
-        return os.path.join(d, "CrateMatch Live.crate")
-
-    def _send_list_to_crate(self, manual=False):
-        paths = [t.get("path") for (_s, t, _l) in self.matches
-                 if t.get("path") and os.path.isfile(t.get("path"))]
-        sig = tuple(paths)
-        if not manual and sig == self._last_crate_sig:
-            return
-        self._last_crate_sig = sig
-        try:
-            write_crate(self._crate_target_path(), paths)
-        except Exception as e:
-            if manual:
-                self._set_status(f"Crate send failed: {e}")
-            return
-        if manual:
-            self._set_status(
-                f"Sent {len(paths)} tracks to the "
-                f"'CrateMatch Live' crate in Serato")
-
+    # ================= drop folder =================
+    # (Send-list-to-crate was removed in v1.6.1 at Keith's ruling:
+    # drag-and-drop to the deck replaced it, button and auto-write
+    # alike. The Drop folder below stays — it's the Files-panel path.)
     @staticmethod
     def _drop_dir_for(seed_path):
         if seed_path and seed_path.startswith("/Volumes/"):
