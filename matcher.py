@@ -45,14 +45,29 @@ def _bpm_score(b1, b2):
     return max(0.0, 1.0 - d / 20.0)
 
 
+def energy01(track):
+    """Energy on one shared 0..1 scale. The baked-in DATABASE value
+    wins (v1.6.0 — it's Spotify-style energy, so a loud-mastered
+    ballad no longer reads as high-energy); the local RMS loudness
+    is only the fallback, mapped from the old 1..10 display scale."""
+    db = track.get("db_energy")
+    if db is not None:
+        try:
+            return max(0.0, min(1.0, float(db)))
+        except (TypeError, ValueError):
+            pass
+    rms = track.get("energy") or 0
+    return max(0.0, min(1.0, rms * 4.0))
+
+
 def similarity(seed, cand,
                w_bpm=0.35, w_key=0.35, w_energy=0.15, w_spectral=0.15):
     if seed["path"] == cand["path"]:
         return 0.0
     bpm_s = _bpm_score(seed.get("bpm"), cand.get("bpm"))
     key_s = key_compat(seed.get("camelot"), cand.get("camelot"))
-    e1, e2 = seed.get("energy") or 0, cand.get("energy") or 0
-    energy_s = max(0.0, 1.0 - abs(e1 - e2) / (max(e1, e2) + 1e-9))
+    e1, e2 = energy01(seed), energy01(cand)
+    energy_s = max(0.0, 1.0 - abs(e1 - e2))
     c1, c2 = seed.get("centroid") or 0, cand.get("centroid") or 0
     z1, z2 = seed.get("zcr") or 0, cand.get("zcr") or 0
     spec_d = abs(c1 - c2) / 4000.0 + abs(z1 - z2) * 8.0
