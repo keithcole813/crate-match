@@ -87,3 +87,34 @@ def crates_for(index, path):
     if hit:
         return hit
     return by_base.get(os.path.basename(path).lower(), set())
+
+
+def list_crates():
+    """[(crate name, [track paths])] for every .crate file on this
+    machine, sorted by name — powers 'Add from crate' (v1.6.1)."""
+    out = []
+    seen_files = set()
+    for root in _default_roots():
+        if not root or not os.path.isdir(root):
+            continue
+        for fn in sorted(os.listdir(root)):
+            if not fn.lower().endswith(".crate"):
+                continue
+            full = os.path.join(root, fn)
+            if full in seen_files:
+                continue
+            seen_files.add(full)
+            try:
+                paths = parse_crate(full)
+            except Exception:
+                continue
+            fixed = []
+            for p in paths:
+                if not p:
+                    continue
+                if not p.startswith("/"):
+                    p = "/" + p
+                fixed.append(p)
+            out.append((crate_name_from_filename(fn), fixed))
+    out.sort(key=lambda it: it[0].lower())
+    return out
