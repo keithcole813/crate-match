@@ -162,6 +162,20 @@ class Library:
         if "year" not in cols:
             self.conn.execute(
                 "ALTER TABLE tracks ADD COLUMN year INTEGER")
+        # v1.6.0: baked-in database numbers — Spotify-style Energy /
+        # Danceability (0..1), the IDs they came from, and the extra
+        # pocket data (Discogs genres/styles) behind the best-version
+        # pocket display. Filled ONCE by the meta bake (meta_bake.py)
+        # during/after the first scan so DJing works fully offline.
+        for col, decl in (
+                ("db_energy", "REAL"), ("db_dance", "REAL"),
+                ("spotify_id", "TEXT"), ("isrc", "TEXT"),
+                ("db_genres", "TEXT DEFAULT ''"),
+                ("pocket_styles", "TEXT DEFAULT ''"),
+                ("meta_tried", "REAL")):
+            if col not in cols:
+                self.conn.execute(
+                    f"ALTER TABLE tracks ADD COLUMN {col} {decl}")
         self.conn.commit()
 
     def get(self, path):
@@ -172,15 +186,72 @@ class Library:
         cols = [d[0] for d in cur.description]
         return dict(zip(cols, row))
 
+    # columns owned by the meta bake — a re-analysis must never wipe
+    # numbers that cost API calls to fetch
+    _BAKE_COLS = ("db_energy", "db_dance", "spotify_id", "isrc",
+                  "db_genres", "pocket_styles", "meta_tried")
+
     def upsert(self, path, artist, title, a, genres="", year=None):
+        keep = {}
+        row = self.get(path)
+        if row:
+            keep = {c: row.get(c) for c in self._BAKE_COLS}
         self.conn.execute(
             """INSERT OR REPLACE INTO tracks
                (path, artist, title, bpm, key_name, camelot, energy,
-                centroid, zcr, duration, mtime, analyzed_at, genres, year)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                centroid, zcr, duration, mtime, analyzed_at, genres, year,
+                db_energy, db_dance, spotify_id, isrc, db_genres,
+                pocket_styles, meta_tried)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (path, artist, title, a["bpm"], a["key"], a["camelot"],
              a["energy"], a["centroid"], a["zcr"], a["duration"],
-             os.path.getmtime(path), time.time(), genres or "", year))
+             os.path.getmtime(path), time.time(), genres or "", year,
+             keep.get("db_energy"), keep.get("db_dance"),
+             keep.get("spotify_id"), keep.get("isrc"),
+             keep.get("db_genres") or "", keep.get("pocket_styles") or "",
+             keep.get("meta_tried")))
+        self.conn.commit()
+
+    def set_db_features(self, path, energy=None, dance=None,
+                        spotify_id=None, isrc=None):
+        """Store database Energy/Danceability (0..1) + source IDs for a
+        track (meta bake). Only non-None values are written."""
+        sets, vals = [], []
+        for col, v in (("db_energy", energy), ("db_dance", dance),
+                       ("spotify_id", spotify_id), ("isrc", isrc)):
+            if v is not None:
+                sets.append(f"{col} = ?")
+                vals.append(v)
+        if not sets:
+            return
+        vals.append(path)
+        self.conn.execute(
+            f"UPDATE tracks SET {', '.join(sets)} WHERE path = ?", vals)
+        self.conn.commit()
+
+    def set_pocket_extra(self, path, db_genres=None, pocket_styles=None):
+        """Store extra pocket data (Discogs/AudioDB genres + styles)
+        behind the best-version pocket display."""
+        sets, vals = [], []
+        if db_genres is not None:
+            sets.append("db_genres = ?")
+            vals.append(db_genres)
+        if pocket_styles is not None:
+            sets.append("pocket_styles = ?")
+            vals.append(pocket_styles)
+        if not sets:
+            return
+        vals.append(path)
+        self.conn.execute(
+            f"UPDATE tracks SET {', '.join(sets)} WHERE path = ?", vals)
+        self.conn.commit()
+
+    def mark_meta_tried(self, path):
+        """Stamp a bake attempt so a track no database knows doesn't
+        get re-queried on every launch (retried after 30 days)."""
+        self.conn.execute(
+            "UPDATE tracks SET meta_tried = ? WHERE path = ?",
+            (time.time(), path))
         self.conn.commit()
 
     def delete(self, path):
