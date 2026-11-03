@@ -20,9 +20,10 @@ import traceback
 from PySide6.QtCore import QMimeData, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QDrag, QFont
 from PySide6.QtWidgets import (
-    QApplication, QCheckBox, QComboBox, QDialog, QFileDialog,
-    QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox, QProgressBar,
-    QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
+    QApplication, QComboBox, QDialog, QFileDialog,
+    QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
+    QProgressBar, QPushButton, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from analyzer import Library, scan_folder, analyze_file
@@ -33,7 +34,7 @@ from pocket import classify_pocket, find_matches, format_key
 from serato_watcher import SeratoWatcher
 from cratetube_bridge import bridge_for_seed
 
-VERSION = "1.5.0"
+VERSION = "1.6.0"
 DB_PATH = os.path.expanduser("~/.crate-match/library.db")
 SETTINGS_PATH = os.path.expanduser("~/.cratematch_settings.json")
 ERROR_LOG = os.path.expanduser("~/cratematch-live-error.log")
@@ -359,9 +360,10 @@ class DownloadDialog(QDialog):
 
 
 class LiveWindowQt(QMainWindow):
-    COLS = ("title", "artist", "bpm", "key", "energy", "score")
+    COLS = ("title", "artist", "bpm", "key", "energy", "dance", "score")
     LABELS = {"title": "Title", "artist": "Artist", "bpm": "BPM",
-              "key": "Key", "energy": "Energy", "score": "Score"}
+              "key": "Key", "energy": "E%", "dance": "D%",
+              "score": "Score"}
 
     def __init__(self, db_path=DB_PATH):
         super().__init__()
@@ -386,9 +388,12 @@ class LiveWindowQt(QMainWindow):
         self._sort_rev = True
         _s = load_settings()
         self._min_setting = str(_s.get("min_score", "60"))
-        self._dl_setting = bool(_s.get("show_downloads", True))
         self.crate_index = None
         self._tag_filling = False
+        self._baking = False
+        self._closing = False
+        self._collapsed = False
+        self._pre_collapse_size = None
         self._analyzing_seeds = set()
         self._last_crate_sig = None
         self._last_drop_sig = None
@@ -404,6 +409,7 @@ class LiveWindowQt(QMainWindow):
         self._timer.timeout.connect(self._drain)
         self._timer.start(150)
         QTimer.singleShot(5000, self._start_tag_fill)
+        QTimer.singleShot(9000, self._start_bake)
 
         self.history = None
         threading.Thread(target=self._build_history, daemon=True).start()
@@ -413,15 +419,54 @@ class LiveWindowQt(QMainWindow):
     def _build(self):
         central = QWidget()
         self.setCentralWidget(central)
-        lay = QVBoxLayout(central)
-        lay.setContentsMargins(10, 10, 10, 10)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(10, 10, 10, 10)
+
+        # ---- collapsed strip (hidden until Collapse is pressed) ----
+        # Keith's rule: collapse, NOT minimize — the strip keeps the
+        # pocket + now-playing + numbers visible and live, stays on
+        # top, and restores in place.
+        self.strip_view = QWidget()
+        strip = QHBoxLayout(self.strip_view)
+        strip.setContentsMargins(2, 0, 2, 0)
+        self.strip_pocket = QLabel("◆ —")
+        self.strip_pocket.setStyleSheet(
+            f"color: {GOLD}; font-size: 13px; font-weight: bold;")
+        strip.addWidget(self.strip_pocket)
+        self.strip_np = QLabel("")
+        self.strip_np.setStyleSheet(f"color: {DIM}; font-size: 12px;")
+        strip.addWidget(self.strip_np)
+        self.strip_stats = QLabel("")
+        self.strip_stats.setStyleSheet(f"font-size: 12px;")
+        strip.addWidget(self.strip_stats)
+        strip.addStretch(1)
+        restore_btn = QPushButton("Restore ⤢")
+        restore_btn.clicked.connect(lambda: self._set_collapsed(False))
+        strip.addWidget(restore_btn)
+        self.strip_view.setVisible(False)
+        root.addWidget(self.strip_view)
+
+        # ---- full view ----
+        self.full_view = QWidget()
+        root.addWidget(self.full_view, 1)
+        lay = QVBoxLayout(self.full_view)
+        lay.setContentsMargins(0, 0, 0, 0)
 
         # brand wordmark — the identity moment at the top of the app
+        wm_row = QHBoxLayout()
         wm = QLabel("◆ CRATEMATCH LIVE")
         wm.setStyleSheet(
             f"color: {GOLD}; font-size: 16px; font-weight: bold; "
             f"letter-spacing: 2px;")
-        lay.addWidget(wm)
+        wm_row.addWidget(wm)
+        wm_row.addStretch(1)
+        collapse_btn = QPushButton("▼ Collapse")
+        collapse_btn.setToolTip(
+            "Shrink to a slim strip that still shows your pocket — "
+            "not a minimize; it stays on top and updates live")
+        collapse_btn.clicked.connect(lambda: self._set_collapsed(True))
+        wm_row.addWidget(collapse_btn)
+        lay.addLayout(wm_row)
         rule = QWidget()
         rule.setFixedHeight(2)
         rule.setStyleSheet(f"background: {GOLD_DARK};")
@@ -435,6 +480,15 @@ class LiveWindowQt(QMainWindow):
             f"color: {GOLD}; font-size: 14px; font-weight: bold;")
         self.np_label.setWordWrap(True)
         lay.addWidget(self.np_label)
+        pk_title = QLabel("POCKET")
+        pk_title.setStyleSheet(f"color: {DIM}; font-size: 11px;")
+        lay.addWidget(pk_title)
+        self.pocket_headline = QLabel("")
+        self.pocket_headline.setStyleSheet(
+            f"color: {GOLD}; font-size: 17px; font-weight: bold; "
+            f"letter-spacing: 1px;")
+        self.pocket_headline.setWordWrap(True)
+        lay.addWidget(self.pocket_headline)
         self.pocket_label = QLabel("")
         self.pocket_label.setStyleSheet(f"color: {DIM};")
         self.pocket_label.setWordWrap(True)
@@ -470,17 +524,16 @@ class LiveWindowQt(QMainWindow):
         lay.addLayout(ctl)
 
         ctl2 = QHBoxLayout()
-        self.dl_check = QCheckBox("Downloads")
-        self.dl_check.setChecked(self._dl_setting)
-        self.dl_check.setToolTip(
-            "Show songs you don't own that you could download "
-            "(turn off when DJing without internet)")
-        self.dl_check.toggled.connect(self._on_dl_toggled)
-        ctl2.addWidget(self.dl_check)
-        ctl2.addStretch(1)
-        self.ct_btn = QPushButton("⬇ Fill pocket")
+        # v1.6.0 (Keith): no Downloads toggle — "Download more" is
+        # always here. It only does anything with internet; offline
+        # it just finds nothing new, the library matches never stop.
+        self.ct_btn = QPushButton("⬇ Download more")
+        self.ct_btn.setStyleSheet(
+            f"color: {GOLD}; border-color: {GOLD_DARK}; "
+            f"font-weight: bold;")
+        self.ct_btn.setToolTip(
+            "Songs like this one that you don't own yet")
         self.ct_btn.clicked.connect(self._fill_pocket)
-        self.ct_btn.setVisible(self._dl_setting)
         ctl2.addWidget(self.ct_btn)
         self.crate_btn = QPushButton("➡ Send list to crate")
         self.crate_btn.clicked.connect(
@@ -489,14 +542,20 @@ class LiveWindowQt(QMainWindow):
         self.scan_btn = QPushButton("📁 Scan library")
         self.scan_btn.clicked.connect(self._scan_library)
         ctl2.addWidget(self.scan_btn)
+        self.keys_btn = QPushButton("🔑")
+        self.keys_btn.setToolTip(
+            "API keys (Discogs token, TheAudioDB key) — entered once, "
+            "they power the offline numbers bake-in")
+        self.keys_btn.clicked.connect(self._open_keys_dialog)
+        ctl2.addWidget(self.keys_btn)
         lay.addLayout(ctl2)
 
         self.table = MatchTable()
         self.table.setColumnCount(len(self.COLS))
         self.table.setHorizontalHeaderLabels(
             [self.LABELS[c] for c in self.COLS])
-        widths = {"title": 150, "artist": 110, "bpm": 52, "key": 52,
-                  "energy": 58, "score": 52}
+        widths = {"title": 140, "artist": 100, "bpm": 50, "key": 48,
+                  "energy": 44, "dance": 44, "score": 50}
         for i, c in enumerate(self.COLS):
             self.table.setColumnWidth(i, widths[c])
         self.table.verticalHeader().setVisible(False)
@@ -535,23 +594,68 @@ class LiveWindowQt(QMainWindow):
                 "No tracks indexed yet — click 📁 Scan library "
                 "and pick the folder your music is in")
 
-    def _on_dl_toggled(self, checked):
-        s = load_settings()
-        s["show_downloads"] = bool(checked)
-        save_settings(s)
-        self.ct_btn.setVisible(bool(checked))
-        if not checked:
-            self._ct_suggestions = []
-            self._bridge = None
-            self._bridge_key = None
-        if checked:
-            self._set_status(
-                "Download suggestions on — ⬇ Fill pocket when a "
-                "pocket runs thin")
+    def _set_collapsed(self, collapsed):
+        """Collapse to the slim strip (NOT minimize): the strip keeps
+        watching Serato and updates live; Restore returns the window
+        to its previous size and place."""
+        if collapsed == self._collapsed:
+            return
+        self._collapsed = collapsed
+        if collapsed:
+            self._pre_collapse_size = self.size()
+            self.full_view.setVisible(False)
+            self.strip_view.setVisible(True)
+            self.resize(self.width(), 56)
         else:
+            self.strip_view.setVisible(False)
+            self.full_view.setVisible(True)
+            if self._pre_collapse_size is not None:
+                self.resize(self._pre_collapse_size)
+
+    def _open_keys_dialog(self):
+        s = load_settings()
+        dlg = QDialog(self)
+        dlg.setWindowTitle("API keys — entered once")
+        dlg.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        lay = QVBoxLayout(dlg)
+        note = QLabel(
+            "These power the offline numbers bake-in. They stay on "
+            "this Mac only.\n\n"
+            "Discogs token: discogs.com → Settings → Developers → "
+            "Generate new token (free). Powers the specific pocket "
+            "names (styles like Trap · Gangsta).\n\n"
+            "TheAudioDB key: optional — the shared test key works, "
+            "a premium key (Patreon) makes the first-scan bake "
+            "faster.")
+        note.setWordWrap(True)
+        note.setStyleSheet(f"color: {DIM};")
+        lay.addWidget(note)
+        lay.addWidget(QLabel("Discogs token:"))
+        dg = QLineEdit(s.get("discogs_token", ""))
+        dg.setEchoMode(QLineEdit.EchoMode.Password)
+        lay.addWidget(dg)
+        lay.addWidget(QLabel("TheAudioDB key:"))
+        adb = QLineEdit(s.get("audiodb_key", ""))
+        adb.setEchoMode(QLineEdit.EchoMode.Password)
+        lay.addWidget(adb)
+        row = QHBoxLayout()
+        row.addStretch(1)
+        save = QPushButton("Save")
+        row.addWidget(save)
+        lay.addLayout(row)
+
+        def do_save():
+            s2 = load_settings()
+            s2["discogs_token"] = dg.text().strip()
+            s2["audiodb_key"] = adb.text().strip()
+            save_settings(s2)
+            dlg.accept()
             self._set_status(
-                "Download suggestions off — library matches only")
-        self._rematch()
+                "Keys saved — the bake-in uses them from here on")
+            self._start_bake()
+
+        save.clicked.connect(do_save)
+        dlg.exec()
 
     def _build_history(self):
         try:
@@ -584,18 +688,52 @@ class LiveWindowQt(QMainWindow):
         save_settings(s)
         self._rematch()
 
+    @staticmethod
+    def _energy_pct(t):
+        """Energy % for display: the baked database number when the
+        track has one; the local loudness mapped onto % until then."""
+        db = t.get("db_energy")
+        if db is not None:
+            try:
+                return f"{round(float(db) * 100):.0f}%"
+            except (TypeError, ValueError):
+                pass
+        e = t.get("energy") or 0
+        return f"{max(1, min(10, round(e * 40))) * 10:.0f}%"
+
+    @staticmethod
+    def _dance_pct(t):
+        db = t.get("db_dance")
+        if db is None:
+            return "—"
+        try:
+            return f"{round(float(db) * 100):.0f}%"
+        except (TypeError, ValueError):
+            return "—"
+
     def _refresh_header(self):
         if not self.seed:
             return
         seed = self.seed
         pk = classify_pocket(seed)
-        bits = [f"Pocket: {pk['label']}"]
+        self.pocket_headline.setText(pk["headline"])
+        stats = []
         if seed.get("bpm"):
-            bits.append(f"{seed['bpm']:.0f} BPM")
+            stats.append(f"{seed['bpm']:.0f} BPM")
         k = format_key(seed.get("camelot"), self.key_box.currentText())
         if k and k != "?":
-            bits.append(f"Key {k}")
-        self.pocket_label.setText(" · ".join(bits))
+            stats.append(f"Key {k}")
+        stats.append(f"E {self._energy_pct(seed)}")
+        stats.append(f"D {self._dance_pct(seed)}")
+        detail = pk["detail"]
+        self.pocket_label.setText(
+            " · ".join(x for x in (detail, " · ".join(stats)) if x))
+        # the collapsed strip mirrors the same live numbers
+        self.strip_pocket.setText(f"◆ {pk['headline']}")
+        self.strip_stats.setText(" · ".join(stats))
+        if self._last_now:
+            self.strip_np.setText(
+                f"{self._last_now.get('title') or ''}"[:28])
 
     def _start_tag_fill(self):
         if self._tag_filling:
@@ -626,6 +764,40 @@ class LiveWindowQt(QMainWindow):
             except Exception:
                 pass
             self.msg_q.put(("tag_done", (tagged,)))
+
+        threading.Thread(target=run, daemon=True).start()
+
+    def _start_bake(self):
+        """First-scan bake-in: fetch database Energy/Danceability %
+        (and Discogs pocket styles) for every track that lacks them,
+        store locally, done — DJing is offline after that. Throttled
+        + resumable in meta_bake; safe to call any time (baked rows
+        are skipped)."""
+        if self._baking or self._closing:
+            return
+        self._baking = True
+
+        def run():
+            filled = attempted = 0
+            try:
+                import meta_bake
+                s = load_settings()
+
+                def prog(i, n, name):
+                    if i == 1 or i % 25 == 0:
+                        self.msg_q.put(
+                            ("bake_status",
+                             f"Baking offline numbers: {i}/{n}…"))
+
+                filled, attempted = meta_bake.bake_library(
+                    self.lib,
+                    audiodb_key=s.get("audiodb_key") or "123",
+                    discogs_token=s.get("discogs_token") or "",
+                    progress_cb=prog,
+                    should_stop=lambda: self._closing)
+            except Exception:
+                pass
+            self.msg_q.put(("bake_done", (filled, attempted)))
 
         threading.Thread(target=run, daemon=True).start()
 
@@ -754,6 +926,7 @@ class LiveWindowQt(QMainWindow):
                     msg += f" — {failed} of {total} files failed"
                 self._set_status(msg)
                 self._start_tag_fill()
+                self._start_bake()
                 self.seed = None
                 if self._last_now:
                     self._handle_now_playing(self._last_now)
@@ -809,7 +982,7 @@ class LiveWindowQt(QMainWindow):
             elif payload and payload.get("thin") and suggs:
                 self._set_status(
                     f"Pocket thin ({payload['library_count']} in "
-                    f"library) — ⬇ Fill pocket has {len(suggs)} "
+                    f"library) — ⬇ Download more has {len(suggs)} "
                     f"songs like this one")
         elif kind == "drop_done":
             self.tracks = self.lib.all_tracks()
@@ -819,6 +992,27 @@ class LiveWindowQt(QMainWindow):
                 f"{self.lib.count()} in library")
             if self.seed:
                 self._rematch()
+        elif kind == "bake_status":
+            if not self._scanning:
+                self._set_status(payload)
+        elif kind == "bake_done":
+            self._baking = False
+            filled, attempted = payload
+            if filled:
+                self.tracks = self.lib.all_tracks()
+                self._set_status(
+                    f"Offline numbers baked in: {filled} songs got "
+                    f"Energy/Dance % — no internet needed at DJ time")
+                if self.seed:
+                    if self._last_now:
+                        self.seed = self._find_seed(self._last_now) \
+                            or self.seed
+                    self._refresh_header()
+                    self._rematch()
+            elif attempted:
+                self._set_status(
+                    f"Bake-in pass done — {attempted} songs checked, "
+                    f"no database numbers found for them yet")
         elif kind == "tag_status":
             if not self._scanning:
                 self._set_status(payload)
@@ -849,6 +1043,7 @@ class LiveWindowQt(QMainWindow):
         self._last_now = now
         self.np_label.setText(
             f"{now.get('artist') or '?'} — {now.get('title') or '?'}")
+        self.strip_np.setText(f"{now.get('title') or ''}"[:28])
         seed = self._find_seed(now)
         if not seed:
             spath = (now.get("path") or "").strip()
@@ -876,7 +1071,8 @@ class LiveWindowQt(QMainWindow):
         self.seed = seed
         self.seed_pocket = classify_pocket(seed)
         self._refresh_header()
-        if not (seed.get("genres") or "").strip():
+        if (not (seed.get("genres") or "").strip()
+                or seed.get("db_energy") is None):
             self._tag_seed(seed)
         self._rematch()
 
@@ -912,15 +1108,12 @@ class LiveWindowQt(QMainWindow):
                     f"(threshold {self.min_box.currentText()})")
         self._send_list_to_crate(manual=False)
         self._refresh_drop_folder()
-        # Fill-pocket suggestions come from an async online lookup
+        # Download-more suggestions come from an async online lookup
         # (never block the UI on the network — v1.2.3 lesson). Keyed
         # by seed + genres so a fresh genre tag re-triggers it.
-        if self.dl_check.isChecked():
-            if self._current_bridge_key() != self._bridge_key:
-                self._bridge_key = self._current_bridge_key()
-                self._kick_bridge()
-        else:
-            self._ct_suggestions = []
+        if self._current_bridge_key() != self._bridge_key:
+            self._bridge_key = self._current_bridge_key()
+            self._kick_bridge()
 
     def _current_bridge_key(self):
         if not self.seed:
@@ -944,25 +1137,41 @@ class LiveWindowQt(QMainWindow):
         threading.Thread(target=run, daemon=True).start()
 
     def _tag_seed(self, seed):
-        """Tag JUST the now-playing track first (MusicBrainz) — the
-        general fill can take minutes; the seed is what matters now."""
+        """Enrich JUST the now-playing track first — the general
+        fills take minutes; the seed is what matters now. Bakes its
+        database Energy/Dance % (meta_bake.bake_one) and fills its
+        MusicBrainz genres. (Pre-1.6.0 this called a Library method
+        that never existed, so the seed-first tag silently failed
+        every time and only the slow general fill ever landed.)"""
         def run():
+            changed = False
             try:
-                from genre_tagger import mb_search
-                g, y = mb_search(seed.get("artist"), seed.get("title"))
-                if g and seed.get("path"):
-                    self.lib.update_genres(seed["path"], g, y)
-                    self.msg_q.put(("seed_tagged", None))
+                import meta_bake
+                s = load_settings()
+                row = self.lib.get(seed["path"]) or seed
+                if meta_bake.bake_one(
+                        self.lib, row,
+                        audiodb_key=s.get("audiodb_key") or "123",
+                        discogs_token=s.get("discogs_token") or ""):
+                    changed = True
             except Exception:
                 pass
+            try:
+                if not (seed.get("genres") or "").strip():
+                    from genre_tagger import mb_search
+                    g, y = mb_search(seed.get("artist"),
+                                     seed.get("title"))
+                    if g and seed.get("path"):
+                        self.lib.set_tags(seed["path"], g, y)
+                        changed = True
+            except Exception:
+                pass
+            if changed:
+                self.msg_q.put(("seed_tagged", None))
 
         threading.Thread(target=run, daemon=True).start()
 
     # ================= rendering =================
-    def _energy_display(self, t):
-        e = t.get("energy") or 0
-        return f"{max(1, min(10, round(e * 40)))}"
-
     def _sort_by(self, col_idx):
         col = self.COLS[col_idx]
         if self._sort_col == col:
@@ -977,7 +1186,8 @@ class LiveWindowQt(QMainWindow):
             t.get("artist") or "",
             f"{t['bpm']:.1f}" if t.get("bpm") else "",
             format_key(t.get("camelot"), self.key_box.currentText()),
-            self._energy_display(t),
+            self._energy_pct(t).rstrip("%"),
+            self._dance_pct(t).rstrip("%"),
             f"{score * 100:.0f}",
         )
 
@@ -1172,11 +1382,6 @@ class LiveWindowQt(QMainWindow):
             self._set_status("Play a song first — then I can check "
                              "its pocket")
             return
-        if not self.dl_check.isChecked():
-            self._set_status(
-                "Downloads are off — tick the Downloads box to see "
-                "songs you don't own")
-            return
         if self._ct_suggestions:
             self._open_fill_dialog(self._ct_suggestions)
             return
@@ -1210,7 +1415,7 @@ class LiveWindowQt(QMainWindow):
         d = self._get_download_dir()
         if not d:
             self._set_status(
-                "No download folder picked — click ⬇ Fill pocket "
+                "No download folder picked — click ⬇ Download more "
                 "again when you're ready to choose one")
             return
         seed_label = ""
@@ -1233,6 +1438,7 @@ class LiveWindowQt(QMainWindow):
 
     # ================= lifecycle =================
     def closeEvent(self, event):
+        self._closing = True
         try:
             self.watcher.stop()
         except Exception:
